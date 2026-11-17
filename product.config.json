@@ -1,0 +1,10 @@
+{
+  "name": "流程稿纸",
+  "tagline": "本地优先的可视化工作流文档",
+  "schemaVersion": 1,
+  "fileExtension": "wflow",
+  "fileMimeType": "application/x-workflow+zip",
+  "draftDatabase": "workflow-studio-recovery",
+  "draftStore": "drafts",
+  "appVersion": "0.1.0"
+}

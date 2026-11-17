@@ -1,0 +1,10 @@
+node_modules/
+dist/
+test-results/
+playwright-report/
+tmp/
+documents/*.tmp-*
+documents/*
+!documents/.gitkeep
+*.local
+.DS_Store

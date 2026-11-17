@@ -1,0 +1,187 @@
+export type NodeKind =
+  | "start"
+  | "task"
+  | "decision"
+  | "milestone"
+  | "end"
+  | "note";
+
+export interface Point {
+  x: number;
+  y: number;
+}
+
+export interface Size {
+  width: number;
+  height: number;
+}
+
+export interface ImportedOrigin {
+  kind: "import";
+  system: string;
+  version: string;
+  commit?: string;
+  originalId: string;
+  importedAt: string;
+}
+
+export interface ManualOrigin {
+  kind: "manual";
+}
+
+export type NodeOrigin = ImportedOrigin | ManualOrigin;
+
+export interface WorkflowNode {
+  id: string;
+  title: string;
+  description: string;
+  type: NodeKind;
+  tags: string[];
+  origin: NodeOrigin;
+  source?: {
+    file?: string;
+    language?: string;
+    symbol?: string;
+    url?: string;
+  };
+}
+
+export interface WorkflowEdge {
+  id: string;
+  source: string;
+  target: string;
+  label?: string;
+  origin: "manual" | "import";
+}
+
+export interface WorkflowGroup {
+  id: string;
+  title: string;
+  nodeIds: string[];
+  parentId?: string;
+  collapsed: boolean;
+  color?: string;
+}
+
+export interface NodeLayout extends Point, Size {}
+
+export interface GroupLayout extends Point, Size {}
+
+export interface Viewport {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
+export interface WorkflowLayout {
+  nodes: Record<string, NodeLayout>;
+  groups: Record<string, GroupLayout>;
+  viewport: Viewport;
+}
+
+export interface DocumentProvenance {
+  system?: string;
+  version?: string;
+  commit?: string;
+  importedAt?: string;
+  sourceFile?: string;
+}
+
+export interface WorkflowDocument {
+  schemaVersion: 1;
+  id: string;
+  metadata: {
+    title: string;
+    description: string;
+    createdAt: string;
+    updatedAt: string;
+    author?: string;
+  };
+  provenance: DocumentProvenance;
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+  groups: WorkflowGroup[];
+  layout: WorkflowLayout;
+  display: {
+    showDescriptions: boolean;
+    theme: "paper";
+  };
+}
+
+export interface WorkflowManifest {
+  format: "local-workflow";
+  containerVersion: 1;
+  documentSchemaVersion: 1;
+  product: string;
+  appVersion: string;
+  createdAt: string;
+  checksum: string;
+  files: string[];
+}
+
+export interface ImportedNodeV1 {
+  id: string;
+  title: string;
+  description?: string;
+  type?: NodeKind;
+  tags?: string[];
+  group?: string;
+  source?: WorkflowNode["source"];
+}
+
+export interface ImportedEdgeV1 {
+  id?: string;
+  source: string;
+  target: string;
+  label?: string;
+}
+
+export interface ImportedGroupV1 {
+  id: string;
+  title: string;
+  parentId?: string;
+  collapsed?: boolean;
+  color?: string;
+}
+
+export interface ImportSnapshotV1 {
+  format: "workflow-import";
+  schemaVersion: 1;
+  version: {
+    label: string;
+    commit?: string;
+    generatedAt?: string;
+  };
+  source: {
+    id: string;
+    name: string;
+    kind?: string;
+    repository?: string;
+  };
+  metadata?: {
+    title?: string;
+    description?: string;
+    author?: string;
+  };
+  nodes: ImportedNodeV1[];
+  edges: ImportedEdgeV1[];
+  groups?: ImportedGroupV1[];
+}
+
+export interface VersionDiff {
+  added: WorkflowNode[];
+  removed: WorkflowNode[];
+  changed: Array<{
+    id: string;
+    before: WorkflowNode;
+    after: WorkflowNode;
+    fields: string[];
+  }>;
+}
+
+export type Selection =
+  | { kind: "none" }
+  | { kind: "node"; id: string }
+  | { kind: "edge"; id: string }
+  | { kind: "group"; id: string };
+

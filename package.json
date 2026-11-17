@@ -1,0 +1,43 @@
+{
+  "name": "local-workflow-studio",
+  "private": true,
+  "version": "0.1.0",
+  "description": "本地优先的可视化工作流文档编辑器",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/local-host.mjs --dev",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "start": "node scripts/local-host.mjs",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "example:wflow": "node scripts/generate-example.mjs"
+  },
+  "dependencies": {
+    "@xyflow/react": "^12.8.5",
+    "fflate": "^0.8.2",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
+    "@testing-library/user-event": "^14.5.2",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.3",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "jsdom": "^25.0.1",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.21",
+    "vitest": "^2.1.8"
+  },
+  "packageManager": "pnpm@10.20.0",
+  "engines": {
+    "node": ">=20"
+  }
+}
