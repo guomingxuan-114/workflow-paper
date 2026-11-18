@@ -1,4 +1,6 @@
 import { PRODUCT } from "../config/product";
+import { getHiddenNodeIds } from "../core/document";
+import { buildWorkflowRouting, type EdgeRoute } from "../core/edgeRouting";
 import type {
   WorkflowDocument,
   WorkflowEdge,
@@ -29,17 +31,54 @@ interface GraphScale {
   height: number;
 }
 
-function graphScale(document: WorkflowDocument): GraphScale {
+function graphScale(
+  document: WorkflowDocument,
+  visibleNodeIds: Set<string>,
+): GraphScale {
   const positions = document.nodes
+    .filter((node) => visibleNodeIds.has(node.id))
     .map((node) => document.layout.nodes[node.id])
     .filter(Boolean);
-  if (positions.length === 0) {
+  const groupBounds = document.groups
+    .map((group) => {
+      const layout = document.layout.groups[group.id];
+      if (!layout) return null;
+      return {
+        x: layout.x,
+        y: layout.y,
+        width: group.collapsed ? Math.min(layout.width, 300) : layout.width,
+        height: group.collapsed ? 76 : layout.height,
+      };
+    })
+    .filter(Boolean) as Array<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }>;
+  if (positions.length === 0 && groupBounds.length === 0) {
     return { viewBox: "0 0 900 420", width: 900, height: 420 };
   }
-  const minX = Math.min(...positions.map((item) => item.x)) - 70;
-  const minY = Math.min(...positions.map((item) => item.y)) - 70;
-  const maxX = Math.max(...positions.map((item) => item.x + item.width)) + 70;
-  const maxY = Math.max(...positions.map((item) => item.y + item.height)) + 70;
+  const minX =
+    Math.min(
+      ...positions.map((item) => item.x),
+      ...groupBounds.map((item) => item.x),
+    ) - 70;
+  const minY =
+    Math.min(
+      ...positions.map((item) => item.y),
+      ...groupBounds.map((item) => item.y),
+    ) - 70;
+  const maxX =
+    Math.max(
+      ...positions.map((item) => item.x + item.width),
+      ...groupBounds.map((item) => item.x + item.width),
+    ) + 70;
+  const maxY =
+    Math.max(
+      ...positions.map((item) => item.y + item.height),
+      ...groupBounds.map((item) => item.y + item.height),
+    ) + 70;
   const width = maxX - minX;
   const height = maxY - minY;
   return {
@@ -64,46 +103,62 @@ function wrapSvgText(value: string, max = 16): string[] {
   return lines.slice(0, 3);
 }
 
-function edgePoints(
-  source: WorkflowDocument["layout"]["nodes"][string],
-  target: WorkflowDocument["layout"]["nodes"][string],
-): { path: string; labelX: number; labelY: number } {
-  const sx = source.x + source.width;
-  const sy = source.y + source.height / 2;
-  const tx = target.x;
-  const ty = target.y + target.height / 2;
-  const curve = Math.max(52, Math.abs(tx - sx) * 0.42);
-  return {
-    path: `M ${sx} ${sy} C ${sx + curve} ${sy}, ${tx - curve} ${ty}, ${tx} ${ty}`,
-    labelX: (sx + tx) / 2,
-    labelY: (sy + ty) / 2 - 8,
-  };
-}
-
 function renderGraph(document: WorkflowDocument, compact = false): string {
-  const scale = graphScale(document);
+  const hidden = getHiddenNodeIds(document);
+  const visibleNodeIds = new Set(
+    document.nodes
+      .filter((node) => !hidden.has(node.id))
+      .map((node) => node.id),
+  );
+  const scale = graphScale(document, visibleNodeIds);
+  const routing = buildWorkflowRouting(document, visibleNodeIds);
   const groupBoxes = document.groups
     .map((group) => {
       const layout = document.layout.groups[group.id];
-      return layout
-        ? `<g class="pdf-group"><rect x="${layout.x}" y="${layout.y}" width="${layout.width}" height="${layout.height}" rx="18"/><text x="${layout.x + 18}" y="${layout.y + 28}">${escapeHtml(group.title)}${group.collapsed ? " · 已折叠" : ""}</text></g>`
-        : "";
+      if (!layout) return "";
+      const width = group.collapsed
+        ? Math.min(layout.width, 300)
+        : layout.width;
+      const height = group.collapsed
+        ? 76
+        : layout.height;
+      return `<g class="pdf-group ${group.collapsed ? "is-collapsed" : ""}"><rect x="${layout.x}" y="${layout.y}" width="${width}" height="${height}" rx="18"/></g>`;
     })
     .join("");
-  const edges = document.edges
-    .map((edge) => {
-      const source = document.layout.nodes[edge.source];
-      const target = document.layout.nodes[edge.target];
-      if (!source || !target) return "";
-      const points = edgePoints(source, target);
-      return `<g class="pdf-edge"><path d="${points.path}" marker-end="url(#arrow)"/>${
-        edge.label
-          ? `<text x="${points.labelX}" y="${points.labelY}" text-anchor="middle">${escapeHtml(edge.label)}</text>`
-          : ""
-      }</g>`;
+  const groupLabels = document.groups
+    .map((group) => {
+      const layout = document.layout.groups[group.id];
+      if (!layout) return "";
+      return `<text class="pdf-group-label" x="${layout.x + 18}" y="${layout.y + 28}">${escapeHtml(group.title)}${group.collapsed ? ` · 已折叠（${group.nodeIds.length} 个节点）` : ""}</text>`;
+    })
+    .join("");
+  const edgeById = new Map(document.edges.map((edge) => [edge.id, edge]));
+  const routesBySource = new Map<string, EdgeRoute[]>();
+  for (const route of Object.values(routing.routes)) {
+    const routeKey = `${route.sourceId}:${route.side}`;
+    const routes = routesBySource.get(routeKey) ?? [];
+    routes.push(route);
+    routesBySource.set(routeKey, routes);
+  }
+  const edges = [...routesBySource.values()]
+    .map((routes) => {
+      const trunk = routes[0]?.trunkPath ?? "";
+      const arms = routes
+        .map((route) => {
+          const edge = edgeById.get(route.edgeId);
+          const label = edge?.label ?? "";
+          return `<g class="pdf-edge"><path d="${route.armPath}" marker-end="url(#arrow)"/>${
+            label
+              ? `<text x="${route.labelPoint.x}" y="${route.labelPoint.y}" text-anchor="middle">${escapeHtml(label)}</text>`
+              : ""
+          }</g>`;
+        })
+        .join("");
+      return `<path class="pdf-edge-trunk" d="${trunk}" marker-end="none"/>${arms}`;
     })
     .join("");
   const nodes = document.nodes
+    .filter((node) => visibleNodeIds.has(node.id))
     .map((node) => {
       const layout = document.layout.nodes[node.id];
       if (!layout) return "";
@@ -118,7 +173,7 @@ function renderGraph(document: WorkflowDocument, compact = false): string {
     .join("");
   return `<svg class="pdf-graph" viewBox="${scale.viewBox}" role="img" aria-label="工作流总览图">
     <defs><marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#8b8173"/></marker></defs>
-    ${groupBoxes}${edges}${nodes}
+    ${groupBoxes}${edges}${nodes}${groupLabels}
   </svg>`;
 }
 
@@ -138,6 +193,18 @@ function pageHeader(document: WorkflowDocument, label: string): string {
 
 function renderOverview(document: WorkflowDocument, page: number, total: number): string {
   const generatedAt = new Date();
+  const hidden = getHiddenNodeIds(document);
+  const visibleCount = document.nodes.length - hidden.size;
+  const bounds = graphScale(
+    document,
+    new Set(
+      document.nodes
+        .filter((node) => !hidden.has(node.id))
+        .map((node) => node.id),
+    ),
+  );
+  const useGroupMap =
+    visibleCount > 16 || bounds.width > 2200 || bounds.height > 1500;
   return `<section class="print-page print-page--overview">
     ${pageHeader(document, "工作流总览")}
     <div class="pdf-title-block">
@@ -152,7 +219,9 @@ function renderOverview(document: WorkflowDocument, page: number, total: number)
         <span>生成时间 <strong>${formatDate(generatedAt)}</strong></span>
       </div>
     </div>
-    <div class="pdf-overview-frame">${renderGraph(document, true)}</div>
+    <div class="pdf-overview-frame">${
+      useGroupMap ? renderGroupMap(document) : renderGraph(document, true)
+    }</div>
     <div class="pdf-summary-strip">
       <span><strong>${document.nodes.length}</strong> 节点</span>
       <span><strong>${document.edges.length}</strong> 关系</span>
@@ -205,10 +274,103 @@ function renderDetailPage(
     ${pageHeader(document, detailLabel(group))}
     <div class="pdf-detail-title">
       <div class="pdf-kicker">DETAIL ${part} / ${parts}</div>
-      <h2>${escapeHtml(group?.title ?? "流程步骤说明")}</h2>
-      <p>${group ? `该分组包含 ${nodes.length} 个节点。以下内容来自可编辑语义模型。` : "不属于任何分组、但仍需完整保留阅读信息的节点。"}</p>
+      <h2>${escapeHtml(group?.title ?? "流程步骤说明")}${
+        group?.collapsed ? " · 已折叠" : ""
+      }</h2>
+      <p>${group ? `该分组包含 ${nodes.length} 个节点${group.collapsed ? "，当前在画布中处于折叠状态" : ""}。以下内容来自可编辑语义模型。` : "不属于任何分组、但仍需完整保留阅读信息的节点。"}</p>
     </div>
     <div class="pdf-detail-list">${nodes.map(nodeDetail).join("")}</div>
+    <footer class="pdf-footer"><span>${escapeHtml(document.metadata.title)}</span><span>第 ${page} / ${total} 页</span></footer>
+  </section>`;
+}
+
+function renderGroupMap(document: WorkflowDocument): string {
+  const cards = document.groups.map((group) => {
+    const memberCount =
+      group.nodeIds.length +
+      document.groups
+        .filter((child) => child.parentId === group.id)
+        .reduce((sum, child) => sum + child.nodeIds.length, 0);
+    return `<article class="pdf-group-map-card">
+      <strong>${escapeHtml(group.title)}</strong>
+      <span>${memberCount} 个节点 · ${group.collapsed ? "已折叠" : "展开"}</span>
+    </article>`;
+  });
+  const grouped = new Set(document.groups.flatMap((group) => group.nodeIds));
+  const ungroupedCount = document.nodes.filter(
+    (node) => !grouped.has(node.id),
+  ).length;
+  if (ungroupedCount > 0) {
+    cards.push(`<article class="pdf-group-map-card">
+      <strong>未分组节点</strong><span>${ungroupedCount} 个节点</span>
+    </article>`);
+  }
+  return `<div class="pdf-group-map">
+    <p>画布较大，总览页按分组提供阅读索引；完整节点与条件在后续详情页分页呈现。</p>
+    <div class="pdf-group-map-grid">${cards.join("")}</div>
+  </div>`;
+}
+
+interface BranchPageSection {
+  source: WorkflowNode;
+  edges: WorkflowEdge[];
+  part: number;
+  parts: number;
+}
+
+function branchPageSections(document: WorkflowDocument): BranchPageSection[] {
+  const sections: BranchPageSection[] = [];
+  const nodeById = new Map(document.nodes.map((node) => [node.id, node]));
+  for (const source of document.nodes) {
+    const edges = document.edges.filter((edge) => edge.source === source.id);
+    if (edges.length < 2) continue;
+    const chunks = Array.from(
+      { length: Math.ceil(edges.length / 7) },
+      (_, index) => edges.slice(index * 7, index * 7 + 7),
+    );
+    chunks.forEach((chunk, index) => {
+      sections.push({
+        source: nodeById.get(source.id) ?? source,
+        edges: chunk,
+        part: index + 1,
+        parts: chunks.length,
+      });
+    });
+  }
+  return sections;
+}
+
+function renderBranchPage(
+  document: WorkflowDocument,
+  section: BranchPageSection,
+  page: number,
+  total: number,
+): string {
+  const nodeTitle = (id: string) =>
+    document.nodes.find((node) => node.id === id)?.title ?? id;
+  const hidden = getHiddenNodeIds(document);
+  return `<section class="print-page print-page--branches">
+    ${pageHeader(document, "分支条件")}
+    <div class="pdf-detail-title">
+      <div class="pdf-kicker">BRANCH ${section.part} / ${section.parts}</div>
+      <h2>${escapeHtml(section.source.title)} · 出口条件</h2>
+      <p>该源节点共有 ${document.edges.filter((edge) => edge.source === section.source.id).length} 条出边。所有分支从同一计算分叉点出发。</p>
+    </div>
+    <table class="pdf-branch-table">
+      <thead><tr><th>目标节点</th><th>方向</th><th>条件 / 标签</th><th>状态</th></tr></thead>
+      <tbody>
+        ${section.edges
+          .map(
+            (edge) => `<tr>
+              <td>${escapeHtml(nodeTitle(edge.target))}</td>
+              <td>${escapeHtml(section.source.title)} → ${escapeHtml(nodeTitle(edge.target))}</td>
+              <td>${escapeHtml(edge.label || "未填写条件")}</td>
+              <td>${hidden.has(edge.target) ? "目标节点已折叠" : "可见"}</td>
+            </tr>`,
+          )
+          .join("")}
+      </tbody>
+    </table>
     <footer class="pdf-footer"><span>${escapeHtml(document.metadata.title)}</span><span>第 ${page} / ${total} 页</span></footer>
   </section>`;
 }
@@ -243,15 +405,19 @@ export function createPrintHtml(document: WorkflowDocument): string {
       });
     });
   }
-  const total = Math.max(1, 1 + detailPages.length);
+  const branchPages = branchPageSections(document);
+  const total = Math.max(1, 1 + branchPages.length + detailPages.length);
   const pages = [
     renderOverview(document, 1, total),
+    ...branchPages.map((section, index) =>
+      renderBranchPage(document, section, index + 2, total),
+    ),
     ...detailPages.map((detail, index) =>
       renderDetailPage(
         document,
         detail.nodes,
         detail.group,
-        index + 2,
+        index + 2 + branchPages.length,
         total,
         detail.part,
         detail.parts,
@@ -282,7 +448,9 @@ export function createPrintHtml(document: WorkflowDocument): string {
   .pdf-overview-frame { flex: 1; min-height: 0; border: 1px solid #ddd7cc; border-radius: 16px; padding: 14px; background-color: #f8f6f0; background-image: radial-gradient(#d8d2c7 .7px, transparent .7px); background-size: 16px 16px; display: flex; align-items: center; justify-content: center; }
   .pdf-graph { width: 100%; height: 100%; max-height: 152mm; overflow: visible; }
   .pdf-group rect { fill: rgba(222, 230, 216, .34); stroke: #b8c7ad; stroke-width: 1.5; }
-  .pdf-group text { font-size: 14px; font-weight: 700; fill: #68735f; }
+  .pdf-group.is-collapsed rect { fill: rgba(238, 231, 218, .72); stroke: #c4b18f; stroke-dasharray: 6 4; }
+  .pdf-group-label { font-size: 14px; font-weight: 700; fill: #68735f; paint-order: stroke; stroke: #f8f6f0; stroke-width: 5px; stroke-linejoin: round; }
+  .pdf-edge-trunk { fill: none; stroke: #8b8173; stroke-width: 1.7; }
   .pdf-edge path { fill: none; stroke: #8b8173; stroke-width: 1.7; }
   .pdf-edge text { font-size: 11px; fill: #685f52; paint-order: stroke; stroke: #f8f6f0; stroke-width: 4px; }
   .pdf-node rect { fill: #fffefa; stroke: #bdb5a7; stroke-width: 1.3; }
@@ -293,6 +461,12 @@ export function createPrintHtml(document: WorkflowDocument): string {
   .pdf-summary-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; margin-top: 12px; }
   .pdf-summary-strip span { background: #f1eee6; border-radius: 7px; padding: 8px 10px; color: #776f62; font-size: 9px; }
   .pdf-summary-strip strong { color: #34302a; font-size: 14px; margin-right: 4px; }
+  .pdf-group-map { width: 100%; }
+  .pdf-group-map > p { margin: 0 0 12px; color: #756e62; font-size: 10px; line-height: 1.6; }
+  .pdf-group-map-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .pdf-group-map-card { padding: 12px; border: 1px solid #d7d0c4; border-radius: 9px; background: #fffefa; }
+  .pdf-group-map-card strong { display: block; margin-bottom: 5px; font-size: 12px; }
+  .pdf-group-map-card span { color: #81796c; font-size: 9px; }
   .pdf-legend { display: flex; flex-wrap: wrap; gap: 12px 22px; align-items: center; margin: 10px 2px 0; color: #71695d; font-size: 8.5px; }
   .pdf-legend span { display: inline-flex; align-items: center; gap: 6px; }
   .legend-line { width: 20px; height: 1px; background: #8b8173; position: relative; }
@@ -307,6 +481,9 @@ export function createPrintHtml(document: WorkflowDocument): string {
   .pdf-detail-title h2 { margin: 0 0 7px; font-size: 23px; }
   .pdf-detail-title p { margin: 0; color: #756e62; font-size: 10px; }
   .pdf-detail-list { display: flex; flex-direction: column; gap: 9px; flex: 1; }
+  .pdf-branch-table { width: 100%; border-collapse: collapse; }
+  .pdf-branch-table th { padding: 7px 8px; border-bottom: 1px solid #cabfae; color: #756d60; font-size: 8px; text-align: left; }
+  .pdf-branch-table td { padding: 8px; border-bottom: 1px solid #e5dfd5; color: #4f493f; font-size: 9px; line-height: 1.45; }
   .pdf-node-detail { border: 1px solid #ddd7cc; border-radius: 10px; padding: 10px 13px; background: #fffefa; page-break-inside: avoid; }
   .pdf-detail-head { display: flex; justify-content: space-between; gap: 12px; color: #8b8276; font-size: 8px; }
   .pdf-kind { text-transform: uppercase; letter-spacing: .08em; font-weight: 700; color: #5e7055; }

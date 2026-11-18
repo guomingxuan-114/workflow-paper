@@ -33,6 +33,14 @@ describe("wflow container", () => {
     expect(manifest.documentSchemaVersion).toBe(1);
   });
 
+  it("preserves the dark display theme without changing schema version", () => {
+    const document = createSampleDocument();
+    document.display.theme = "dark";
+    const reopened = unpackWorkflow(packWorkflow(document));
+    expect(reopened.schemaVersion).toBe(1);
+    expect(reopened.display.theme).toBe("dark");
+  });
+
   it("rejects corrupt document checksums", () => {
     const document = createSampleDocument();
     const json = documentToJson(document);

@@ -1,4 +1,10 @@
-import type { VersionDiff, WorkflowDocument, WorkflowNode } from "./types";
+import type {
+  VersionDiff,
+  WorkflowDocument,
+  WorkflowEdge,
+  WorkflowGroup,
+  WorkflowNode,
+} from "./types";
 
 function comparable(node: WorkflowNode) {
   return {
@@ -34,6 +40,65 @@ export function compareWorkflowVersions(
       changed.push({ id: node.id, before: previous, after: node, fields });
     }
   }
-  return { added, removed, changed };
+  const edgesBefore = new Map(base.edges.map((edge) => [edge.id, edge]));
+  const edgesAfter = new Map(current.edges.map((edge) => [edge.id, edge]));
+  const addedEdges = current.edges.filter((edge) => !edgesBefore.has(edge.id));
+  const removedEdges = base.edges.filter((edge) => !edgesAfter.has(edge.id));
+  const changedEdges: VersionDiff["edges"]["changed"] = [];
+  for (const edge of current.edges) {
+    const previous = edgesBefore.get(edge.id);
+    if (!previous) continue;
+    const fields = (["source", "target", "label"] as const).filter(
+      (field) => previous[field] !== edge[field],
+    );
+    if (fields.length > 0) {
+      changedEdges.push({
+        id: edge.id,
+        before: previous,
+        after: edge,
+        fields: [...fields],
+      });
+    }
+  }
+
+  const groupsBefore = new Map(base.groups.map((group) => [group.id, group]));
+  const groupsAfter = new Map(current.groups.map((group) => [group.id, group]));
+  const addedGroups = current.groups.filter((group) => !groupsBefore.has(group.id));
+  const removedGroups = base.groups.filter((group) => !groupsAfter.has(group.id));
+  const changedGroups: VersionDiff["groups"]["changed"] = [];
+  for (const group of current.groups) {
+    const previous = groupsBefore.get(group.id);
+    if (!previous) continue;
+    const fields = (
+      ["title", "collapsed", "color", "nodeIds", "parentId"] as const
+    ).filter(
+      (field) =>
+        JSON.stringify(previous[field]) !== JSON.stringify(group[field]),
+    );
+    if (fields.length > 0) {
+      changedGroups.push({
+        id: group.id,
+        before: previous,
+        after: group,
+        fields: [...fields],
+      });
+    }
+  }
+
+  return {
+    added,
+    removed,
+    changed,
+    edges: {
+      added: addedEdges,
+      removed: removedEdges,
+      changed: changedEdges,
+    },
+    groups: {
+      added: addedGroups,
+      removed: removedGroups,
+      changed: changedGroups,
+    },
+  };
 }
 

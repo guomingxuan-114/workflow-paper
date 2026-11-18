@@ -14,12 +14,14 @@ import {
   ListTree,
   Maximize,
   Menu,
+  Moon,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightOpen,
   Redo2,
   Save,
   Search,
+  Sun,
   Undo2,
 } from "lucide-react";
 import { PRODUCT } from "../config/product";
@@ -36,6 +38,7 @@ import {
   updateGroup,
   updateNode,
   withNode,
+  workflowContentKey,
   WorkflowValidationError,
 } from "../core/document";
 import { compareWorkflowVersions } from "../core/diff";
@@ -54,6 +57,7 @@ import type {
   VersionDiff,
   WorkflowDocument,
   WorkflowNode,
+  WorkflowTheme,
 } from "../core/types";
 import { localHost } from "../host/localHost";
 import { createPrintHtml } from "../pdf/printDocument";
@@ -65,6 +69,7 @@ import {
 } from "../persistence/draftStore";
 import { CanvasView } from "./CanvasView";
 import {
+  BranchConditionsDialog,
   ContentEditorDialog,
   ErrorDialog,
   ImportGuideDialog,
@@ -105,9 +110,19 @@ function filenameFor(document: WorkflowDocument): string {
   return `${document.metadata.title || "未命名工作流"}.${PRODUCT.fileExtension}`;
 }
 
+function preferredTheme(): WorkflowTheme {
+  try {
+    return window.localStorage.getItem("workflow-theme") === "dark"
+      ? "dark"
+      : "paper";
+  } catch {
+    return "paper";
+  }
+}
+
 export function App() {
   const [document, setDocumentState] = useState<WorkflowDocument>(() =>
-    createDocument(),
+    createDocument("未命名工作流", preferredTheme()),
   );
   const documentRef = useRef(document);
   const [past, setPast] = useState<WorkflowDocument[]>([]);
@@ -131,6 +146,7 @@ export function App() {
   const [templateOpen, setTemplateOpen] = useState(false);
   const [importGuideOpen, setImportGuideOpen] = useState(false);
   const [shortcutOpen, setShortcutOpen] = useState(false);
+  const [branchSourceId, setBranchSourceId] = useState<string | null>(null);
   const [recovery, setRecovery] = useState<RecoveryDraft | null>(null);
   const [error, setError] = useState<ErrorState | null>(null);
   const [diffState, setDiffState] = useState<{
@@ -151,7 +167,7 @@ export function App() {
   const compareInputRef = useRef<HTMLInputElement>(null);
 
   const dirty = useMemo(
-    () => savedSnapshot !== JSON.stringify(document),
+    () => savedSnapshot !== workflowContentKey(document),
     [document, savedSnapshot],
   );
 
@@ -235,7 +251,7 @@ export function App() {
     (next: WorkflowDocument, nextName: string | null, baseline = false) => {
       setDocument(next);
       setFileName(nextName);
-      setSavedSnapshot(baseline ? JSON.stringify(next) : null);
+      setSavedSnapshot(baseline ? workflowContentKey(next) : null);
       setPast([]);
       setFuture([]);
       setHasWorkspace(true);
@@ -246,6 +262,26 @@ export function App() {
     [clearSelection, setDocument],
   );
 
+  const updateViewport = useCallback(
+    (viewport: WorkflowDocument["layout"]["viewport"]) => {
+      const current = documentRef.current;
+      if (
+        Math.abs(current.layout.viewport.x - viewport.x) < 0.5 &&
+        Math.abs(current.layout.viewport.y - viewport.y) < 0.5 &&
+        Math.abs(current.layout.viewport.zoom - viewport.zoom) < 0.001
+      ) {
+        return;
+      }
+      const next = {
+        ...current,
+        layout: { ...current.layout, viewport },
+      };
+      documentRef.current = next;
+      setDocumentState(next);
+    },
+    [],
+  );
+
   const confirmDiscard = useCallback(() => {
     if (!dirty || !hasWorkspace) return true;
     return window.confirm("当前工作流有未保存修改。继续并丢弃这些修改吗？");
@@ -253,10 +289,31 @@ export function App() {
 
   const newBlank = useCallback(() => {
     if (!confirmDiscard()) return;
-    const next = createDocument();
+    const next = createDocument("未命名工作流", preferredTheme());
     openDocument(next, null, true);
     setSaveState("idle");
   }, [confirmDiscard, openDocument]);
+
+  const toggleTheme = useCallback(() => {
+    apply(
+      (current) => ({
+        ...current,
+        display: {
+          ...current.display,
+          theme: current.display.theme === "dark" ? "paper" : "dark",
+        },
+      }),
+      true,
+    );
+  }, [apply]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("workflow-theme", document.display.theme);
+    } catch {
+      // Theme persistence is optional when local storage is unavailable.
+    }
+  }, [document.display.theme]);
 
   const save = useCallback(
     async (saveAs = false, quiet = false) => {
@@ -270,7 +327,7 @@ export function App() {
           saveAs,
         );
         setFileName(result.fileName);
-        setSavedSnapshot(JSON.stringify(snapshot));
+        setSavedSnapshot(workflowContentKey(snapshot));
         setSaveState("saved");
         await clearRecoveryDraft();
         if (!quiet) {
@@ -325,9 +382,9 @@ export function App() {
           ? { x: anchor.x + 290, y: anchor.y }
           : { x: 150 + current.nodes.length * 24, y: 150 });
       const node = createNode(
-        current.nodes.length === 0 ? "开始" : "新步骤",
+        "新步骤",
         computed,
-        current.nodes.length === 0 ? "start" : "task",
+        "task",
       );
       apply((doc) => withNode(doc, node, computed), true);
       if (selectedNodeIds[0] && current.nodes.some((item) => item.id === selectedNodeIds[0])) {
@@ -602,7 +659,7 @@ export function App() {
       try {
         const result = await localHost.saveWorkflow(snapshot, fileName, false);
         if (cancelled) return;
-        setSavedSnapshot(JSON.stringify(snapshot));
+        setSavedSnapshot(workflowContentKey(snapshot));
         setSaveState("autosaved");
         await clearRecoveryDraft();
       } catch {
@@ -736,6 +793,7 @@ export function App() {
           onImportSample={importSampleNow}
           onTemplates={() => setTemplateOpen(true)}
           onOpen={() => void open()}
+          theme={document.display.theme}
         />
         <input
           ref={importInputRef}
@@ -780,7 +838,10 @@ export function App() {
   }
 
   return (
-    <div className={`app-shell ${dirty ? "is-dirty" : ""}`}>
+    <div
+      className={`app-shell ${dirty ? "is-dirty" : ""}`}
+      data-theme={document.display.theme}
+    >
       <header className="topbar">
         <div className="topbar-left">
           <button
@@ -850,6 +911,26 @@ export function App() {
           </button>
         </div>
         <div className="topbar-actions">
+          <button
+            className="icon-button"
+            onClick={toggleTheme}
+            aria-label={
+              document.display.theme === "dark"
+                ? "切换浅色模式"
+                : "切换深色模式"
+            }
+            title={
+              document.display.theme === "dark"
+                ? "切换浅色模式"
+                : "切换深色模式"
+            }
+          >
+            {document.display.theme === "dark" ? (
+              <Sun size={17} />
+            ) : (
+              <Moon size={17} />
+            )}
+          </button>
           <button className="icon-button" onClick={() => void save()} aria-label="保存">
             <Save size={17} />
           </button>
@@ -1021,24 +1102,10 @@ export function App() {
                 if (primary.kind !== "none") setInspectorOpen(true);
               }}
               onEditNode={setEditorNodeId}
+              onCreateGroup={createGroup}
+              onEditBranches={setBranchSourceId}
               onToggleGroup={toggleGroup}
-              onViewportChange={(viewport) => {
-                const current = documentRef.current;
-                if (
-                  Math.abs(current.layout.viewport.x - viewport.x) < 1 &&
-                  Math.abs(current.layout.viewport.y - viewport.y) < 1 &&
-                  Math.abs(current.layout.viewport.zoom - viewport.zoom) < 0.002
-                ) {
-                  return;
-                }
-                apply(
-                  (doc) => ({
-                    ...doc,
-                    layout: { ...doc.layout, viewport },
-                  }),
-                  false,
-                );
-              }}
+              onViewportChange={updateViewport}
             />
           ) : (
             <OutlineView
@@ -1085,6 +1152,7 @@ export function App() {
 
       <input
         ref={importInputRef}
+        data-testid="import-input"
         hidden
         type="file"
         accept=".json,application/json"
@@ -1096,6 +1164,7 @@ export function App() {
       />
       <input
         ref={compareInputRef}
+        data-testid="compare-input"
         hidden
         type="file"
         accept=".json,application/json"
@@ -1134,6 +1203,43 @@ export function App() {
       {shortcutOpen ? (
         <ShortcutDialog onClose={() => setShortcutOpen(false)} />
       ) : null}
+      {branchSourceId
+        ? (() => {
+            const source = document.nodes.find(
+              (node) => node.id === branchSourceId,
+            );
+            if (!source) return null;
+            return (
+              <BranchConditionsDialog
+                source={source}
+                edges={document.edges.filter(
+                  (edge) => edge.source === branchSourceId,
+                )}
+                targetTitle={(nodeId) =>
+                  document.nodes.find((node) => node.id === nodeId)?.title ??
+                  nodeId
+                }
+                onSave={(labels) =>
+                  apply(
+                    (current) => ({
+                      ...current,
+                      edges: current.edges.map((edge) =>
+                        edge.source === branchSourceId
+                          ? {
+                              ...edge,
+                              label: labels[edge.id]?.trim() ?? "",
+                            }
+                          : edge,
+                      ),
+                    }),
+                    true,
+                  )
+                }
+                onClose={() => setBranchSourceId(null)}
+              />
+            );
+          })()
+        : null}
       {importGuideOpen ? (
         <ImportGuideDialog
           onChooseFile={() => importInputRef.current?.click()}

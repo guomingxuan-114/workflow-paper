@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
+import { strFromU8, unzipSync } from "fflate";
 
 test("core editing, persistence, recovery, PDF and narrow layout", async ({
   page,
@@ -35,6 +36,8 @@ test("core editing, persistence, recovery, PDF and narrow layout", async ({
   await page.getByRole("button", { name: "新建空白" }).click();
   await page.waitForTimeout(300);
   await expect(page.getByLabel("工作流画布")).toBeVisible();
+  await page.getByLabel("收起详情栏").click();
+  await page.getByLabel("收起侧栏").click();
 
   const canvas = page.locator(".react-flow__pane");
   const canvasBox = await canvas.boundingBox();
@@ -58,6 +61,17 @@ test("core editing, persistence, recovery, PDF and narrow layout", async ({
       page.locator(".react-flow__viewport").getAttribute("style"),
     )
     .not.toBe(viewportBefore);
+  await expect(page.locator(".doc-state")).toContainText("已就绪");
+  await page.getByLabel("切换深色模式").click();
+  await expect(page.locator(".app-shell")).toHaveAttribute(
+    "data-theme",
+    "dark",
+  );
+  await page.getByLabel("切换浅色模式").click();
+  await expect(page.locator(".app-shell")).toHaveAttribute(
+    "data-theme",
+    "paper",
+  );
 
   await page.mouse.click(
     canvasBox.x + canvasBox.width * 0.38,
@@ -66,6 +80,9 @@ test("core editing, persistence, recovery, PDF and narrow layout", async ({
   );
   await page.getByRole("menuitem", { name: /新建步骤/ }).click();
   await expect(page.locator(".workflow-node")).toHaveCount(1);
+  await expect(page.locator(".workflow-node").first()).toHaveClass(
+    /workflow-node--task/,
+  );
 
   await page.locator(".workflow-node").first().dblclick();
   const editor = page.getByRole("dialog", { name: "编辑节点内容" });
@@ -81,22 +98,166 @@ test("core editing, persistence, recovery, PDF and narrow layout", async ({
   await page.keyboard.press("Control+Shift+z");
   await expect(page.getByText("接收需求", { exact: true }).first()).toBeVisible();
 
-  const sourceHandle = page.locator(".node-handle--source").first();
-  const handleBox = await sourceHandle.boundingBox();
-  if (!handleBox) throw new Error("Source handle has no dimensions");
+  const nodeBeforeDrag = await page.locator(".workflow-node").first().boundingBox();
+  if (!nodeBeforeDrag) throw new Error("Node drag target unavailable");
   await page.mouse.move(
-    handleBox.x + handleBox.width / 2,
-    handleBox.y + handleBox.height / 2,
+    nodeBeforeDrag.x + nodeBeforeDrag.width * 0.75,
+    nodeBeforeDrag.y + nodeBeforeDrag.height * 0.75,
   );
   await page.mouse.down();
   await page.mouse.move(
-    handleBox.x + 280,
-    handleBox.y + 45,
+    nodeBeforeDrag.x + nodeBeforeDrag.width * 0.75 + 36,
+    nodeBeforeDrag.y + nodeBeforeDrag.height * 0.75 + 24,
+    { steps: 6 },
+  );
+  await page.mouse.up();
+  const nodeAfterDrag = await page.locator(".workflow-node").first().boundingBox();
+  expect(nodeAfterDrag?.x).not.toBe(nodeBeforeDrag.x);
+  await expect(page.locator(".react-flow__edge")).toHaveCount(0);
+  const sourceHandle = page.locator(".node-connect-edge--right").first();
+  const handleBox = await sourceHandle.boundingBox();
+  if (!handleBox) throw new Error("Node border hit area has no dimensions");
+  await page.mouse.move(
+    handleBox.x + handleBox.width / 2,
+    handleBox.y + handleBox.height * 0.25,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    handleBox.x + 420,
+    handleBox.y + 120,
     { steps: 8 },
+  );
+  await expect(page.locator(".connection-preview-path")).toHaveCount(1);
+  await expect(page.locator(".connection-preview-path")).toHaveAttribute(
+    "d",
+    /C/,
   );
   await page.mouse.up();
   await page.waitForTimeout(300);
   await expect(page.locator(".workflow-node")).toHaveCount(2);
+  await page.keyboard.press("Control+0");
+  await page.waitForTimeout(450);
+
+  const firstNode = page.locator(".workflow-node").nth(0);
+  const secondNode = page.locator(".workflow-node").nth(1);
+  const firstTestId = (await firstNode.getAttribute("data-testid"))!;
+  const secondTestId = (await secondNode.getAttribute("data-testid"))!;
+  const firstId = firstTestId.replace(/^node-/, "");
+  const secondId = secondTestId.replace(/^node-/, "");
+  const reverseStart = await secondNode
+    .locator(".node-connect-edge--bottom")
+    .boundingBox();
+  const reverseTarget = await firstNode.boundingBox();
+  if (!reverseStart || !reverseTarget) {
+    throw new Error("Neutral connection handles are unavailable");
+  }
+  await page.mouse.move(
+    reverseStart.x + reverseStart.width / 2,
+    reverseStart.y + reverseStart.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    reverseTarget.x + reverseTarget.width * 0.5,
+    reverseTarget.y + reverseTarget.height * 0.5,
+    { steps: 8 },
+  );
+  await expect(page.locator(".connection-target-outline")).toHaveCount(1);
+  await page.mouse.up();
+  await expect(
+    page.locator(
+      `.workflow-edge-hitarea[data-edge-source="${secondId}"][data-edge-target="${firstId}"]`,
+    ),
+  ).toHaveCount(1);
+
+  await page.mouse.click(
+    canvasBox.x + canvasBox.width * 0.5,
+    canvasBox.y + canvasBox.height * 0.12,
+    { button: "right" },
+  );
+  await page.getByRole("menuitem", { name: "新建判断" }).click();
+  await expect(page.locator(".workflow-node")).toHaveCount(3);
+  const thirdNode = page.locator(".workflow-node").nth(2);
+  const thirdTestId = (await thirdNode.getAttribute("data-testid"))!;
+  const branchSourceHandle = await firstNode
+    .locator(".node-connect-edge--right")
+    .boundingBox();
+  const branchTargetHandle = await thirdNode.boundingBox();
+  if (!branchSourceHandle || !branchTargetHandle) {
+    throw new Error("Branch connection handles are unavailable");
+  }
+  await page.mouse.move(
+    branchSourceHandle.x + branchSourceHandle.width / 2,
+    branchSourceHandle.y + branchSourceHandle.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    branchTargetHandle.x + branchTargetHandle.width / 2,
+    branchTargetHandle.y + branchTargetHandle.height / 2,
+    { steps: 8 },
+  );
+  await page.mouse.up();
+  await expect(page.locator(".branch-point")).toHaveCount(1);
+  await page.locator(".branch-point").click({ button: "right" });
+  const branchDialog = page.getByRole("dialog", { name: "分支条件" });
+  await expect(branchDialog).toBeVisible();
+  const branchInputs = branchDialog.locator("input");
+  await branchInputs.nth(0).fill("主路径");
+  await branchInputs.nth(1).fill("备选路径");
+  await branchDialog.getByRole("button", { name: "保存全部条件" }).click();
+  await expect(page.getByText("主路径", { exact: true })).toBeVisible();
+  await expect(page.getByText("备选路径", { exact: true })).toBeVisible();
+  const screenshotDirectory = path.resolve("output/screenshots");
+  fs.mkdirSync(screenshotDirectory, { recursive: true });
+  const branchInspectorCollapse = page.getByLabel("收起详情栏");
+  if (await branchInspectorCollapse.isVisible().catch(() => false)) {
+    await branchInspectorCollapse.click();
+  }
+  await page.screenshot({
+    path: path.join(screenshotDirectory, "04-multi-branch.png"),
+  });
+
+  await firstNode.click();
+  await thirdNode.click({ modifiers: ["Shift"] });
+  await expect(firstNode).toHaveClass(/is-selected/);
+  await expect(thirdNode).toHaveClass(/is-selected/);
+  await page.mouse.click(
+    canvasBox.x + canvasBox.width * 0.06,
+    canvasBox.y + canvasBox.height * 0.82,
+    { button: "right" },
+  );
+  await page.getByRole("menuitem", { name: "从选择创建分组" }).click();
+  await expect(page.locator(".workflow-group")).toHaveCount(1);
+  await page.keyboard.press("Control+0");
+  await page.waitForTimeout(450);
+  const memberBefore = await firstNode.boundingBox();
+  const groupTitlebar = page.locator(".group-titlebar").first();
+  const groupBox = await groupTitlebar.boundingBox();
+  if (!memberBefore || !groupBox) throw new Error("Group drag target unavailable");
+  await page.mouse.move(
+    groupBox.x + groupBox.width - 12,
+    groupBox.y + 12,
+  );
+  await page.mouse.down();
+  await page.mouse.move(groupBox.x + 95, groupBox.y + 55, { steps: 8 });
+  await page.mouse.up();
+  const memberAfter = await firstNode.boundingBox();
+  expect(memberAfter?.x).not.toBe(memberBefore.x);
+  await page.keyboard.press("Control+z");
+  await expect
+    .poll(async () => {
+      const x = (await firstNode.boundingBox())?.x;
+      return x === undefined ? Number.POSITIVE_INFINITY : Math.abs(x - memberBefore.x);
+    })
+    .toBeLessThan(3);
+  await page.keyboard.press("Control+Shift+z");
+  await expect
+    .poll(async () => {
+      const x = (await firstNode.boundingBox())?.x;
+      return x === undefined || memberAfter === undefined
+        ? Number.POSITIVE_INFINITY
+        : Math.abs(x - memberAfter.x);
+    })
+    .toBeLessThan(3);
 
   page.once("dialog", (dialog) => dialog.accept("e2e-flow"));
   await page.getByLabel("保存").click();
@@ -105,14 +266,37 @@ test("core editing, persistence, recovery, PDF and narrow layout", async ({
   await expect.poll(() => fs.existsSync(savedPath)).toBe(true);
   const savedBytes = fs.readFileSync(savedPath);
   expect(savedBytes.subarray(0, 2).toString()).toBe("PK");
+  const savedFiles = unzipSync(new Uint8Array(savedBytes));
+  const savedDocument = JSON.parse(
+    strFromU8(savedFiles["document.json"]),
+  ) as {
+    layout: {
+      nodes: Record<string, { x: number; y: number }>;
+      groups: Record<string, { x: number; y: number }>;
+    };
+  };
+  const savedGroupPosition = Object.values(savedDocument.layout.groups)[0];
+  const savedMemberPosition = savedDocument.layout.nodes[firstId];
 
   await page.reload();
   await expect(page.getByRole("heading", { name: /把流程画下来/ })).toBeVisible();
   page.once("dialog", (dialog) => dialog.accept("1"));
   await page.getByRole("button", { name: "打开本地文件" }).click();
   await expect(page.getByLabel("工作流画布")).toBeVisible();
-  await expect(page.locator(".workflow-node")).toHaveCount(2);
+  await expect(page.locator(".workflow-node")).toHaveCount(3);
   await expect(page.getByText("接收需求", { exact: true }).first()).toBeVisible();
+  await page.getByRole("button", { name: "保存", exact: true }).click();
+  await expect.poll(() => fs.existsSync(savedPath)).toBe(true);
+  const reopenedFiles = unzipSync(new Uint8Array(fs.readFileSync(savedPath)));
+  const reopenedDocument = JSON.parse(
+    strFromU8(reopenedFiles["document.json"]),
+  ) as typeof savedDocument;
+  expect(Object.values(reopenedDocument.layout.groups)[0]).toMatchObject(
+    savedGroupPosition,
+  );
+  expect(reopenedDocument.layout.nodes[firstId]).toMatchObject(
+    savedMemberPosition,
+  );
 
   await page.locator(".workflow-node").first().dblclick();
   const renameEditor = page.getByRole("dialog", { name: "编辑节点内容" });
@@ -125,16 +309,19 @@ test("core editing, persistence, recovery, PDF and narrow layout", async ({
   await expect(recovery).toBeVisible();
   await recovery.getByRole("button", { name: "恢复工作流" }).click();
   await expect(page.getByText("接收需求 v2", { exact: true }).first()).toBeVisible();
+  await page.locator(".group-collapse").first().click();
 
   const popupPromise = context.waitForEvent("page");
   await page.getByRole("button", { name: "导出 PDF" }).click();
   const printPage = await popupPromise;
   await printPage.waitForLoadState("domcontentloaded");
-  await expect(printPage.locator(".print-page")).toHaveCount(2);
+  await expect(printPage.locator(".print-page")).toHaveCount(4);
   await expect(
-    printPage.getByRole("heading", { name: "接收需求 v2" }),
+    printPage.getByRole("heading", { name: "接收需求 v2", exact: true }),
   ).toBeVisible();
-  await expect(printPage.getByText(/第 1 \/ 2 页/)).toBeVisible();
+  await expect(printPage.getByText(/第 1 \/ 4 页/)).toBeVisible();
+  await expect(printPage.getByText(/已折叠/).first()).toBeVisible();
+  await expect(printPage.getByText("出口条件")).toBeVisible();
   const outputDir = path.resolve("tmp/validation");
   fs.mkdirSync(outputDir, { recursive: true });
   await printPage.pdf({
@@ -184,6 +371,28 @@ test("imported snapshot keeps groups and exports complete paginated PDF", async 
     format: "A4",
     printBackground: true,
   });
+
+  const modifiedImport = JSON.parse(
+    fs.readFileSync(path.resolve("examples/import-snapshot.v1.json"), "utf8"),
+  ) as {
+    edges: Array<Record<string, unknown>>;
+    nodes: Array<Record<string, unknown>>;
+  };
+  modifiedImport.edges[0].label = "夜间执行";
+  const testsNode = modifiedImport.nodes.find((node) => node.id === "tests")!;
+  testsNode.group = "release";
+  const modifiedImportPath = path.resolve("tmp/e2e-modified-import.json");
+  fs.mkdirSync(path.dirname(modifiedImportPath), { recursive: true });
+  fs.writeFileSync(modifiedImportPath, JSON.stringify(modifiedImport, null, 2));
+  await page.getByRole("button", { name: "版本对比" }).click();
+  await page.getByTestId("compare-input").setInputFiles(modifiedImportPath);
+  const diffDialog = page.getByRole("dialog", { name: "版本对比" });
+  await expect(diffDialog).toBeVisible();
+  await expect(diffDialog.getByRole("heading", { name: "关系差异" })).toBeVisible();
+  await expect(diffDialog.getByRole("heading", { name: "分组差异" })).toBeVisible();
+  await expect(diffDialog.getByText("夜间执行")).toBeVisible();
+  await expect(diffDialog.getByText("nodeIds").first()).toBeVisible();
+  await diffDialog.getByRole("button", { name: "关闭" }).click();
 
   await page.locator(".workflow-group .group-collapse").first().click();
   await expect(page.locator(".workflow-node")).toHaveCount(4);

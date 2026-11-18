@@ -3,12 +3,14 @@ import {
   ArrowRight,
   CheckCircle2,
   FileJson2,
+  GitBranch,
   GitCompareArrows,
   LayoutTemplate,
   Plus,
   TriangleAlert,
 } from "lucide-react";
 import type {
+  WorkflowEdge,
   VersionDiff,
   WorkflowDocument,
   WorkflowNode,
@@ -282,6 +284,20 @@ export function VersionDiffDialog({
   onChooseAnother: () => void;
   onClose: () => void;
 }) {
+  const nodeTitle = (nodeId: string, doc: WorkflowDocument) =>
+    doc.nodes.find((node) => node.id === nodeId)?.title ?? nodeId;
+  const edgeText = (edge: WorkflowEdge, doc: WorkflowDocument) =>
+    `${nodeTitle(edge.source, doc)} → ${nodeTitle(edge.target, doc)}${
+      edge.label ? ` · ${edge.label}` : ""
+    }`;
+  const addedTotal =
+    diff.added.length + diff.edges.added.length + diff.groups.added.length;
+  const removedTotal =
+    diff.removed.length + diff.edges.removed.length + diff.groups.removed.length;
+  const changedTotal =
+    diff.changed.length +
+    diff.edges.changed.length +
+    diff.groups.changed.length;
   return (
     <Modal
       title="版本对比"
@@ -302,9 +318,9 @@ export function VersionDiffDialog({
       }
     >
       <div className="diff-summary">
-        <span className="diff-added">+{diff.added.length} 新增</span>
-        <span className="diff-removed">-{diff.removed.length} 删除</span>
-        <span className="diff-changed">~{diff.changed.length} 修改</span>
+        <span className="diff-added">+{addedTotal} 新增</span>
+        <span className="diff-removed">-{removedTotal} 删除</span>
+        <span className="diff-changed">~{changedTotal} 修改</span>
       </div>
       <div className="diff-columns">
         <section>
@@ -344,6 +360,86 @@ export function VersionDiffDialog({
           {diff.changed.length === 0 ? <p className="diff-empty">无</p> : null}
         </section>
       </div>
+      <section className="diff-entity-section">
+        <div className="diff-entity-heading">
+          <h3>关系差异</h3>
+          <span>
+            +{diff.edges.added.length} / -{diff.edges.removed.length} / ~
+            {diff.edges.changed.length}
+          </span>
+        </div>
+        <div className="diff-flat-list">
+          {diff.edges.added.map((edge) => (
+            <div className="diff-row diff-row--added" key={`add-edge-${edge.id}`}>
+              <Plus size={13} />
+              {edgeText(edge, candidate)}
+            </div>
+          ))}
+          {diff.edges.removed.map((edge) => (
+            <div className="diff-row diff-row--removed" key={`remove-edge-${edge.id}`}>
+              <span>-</span>
+              {edgeText(edge, current)}
+            </div>
+          ))}
+          {diff.edges.changed.map((entry) => (
+            <div className="diff-row diff-row--changed" key={`change-edge-${entry.id}`}>
+              <span>~</span>
+              <span>
+                {edgeText(entry.before, current)} →{" "}
+                {edgeText(entry.after, candidate)}
+                <small>{entry.fields.join("、")}</small>
+              </span>
+            </div>
+          ))}
+          {diff.edges.added.length +
+            diff.edges.removed.length +
+            diff.edges.changed.length ===
+          0 ? (
+            <p className="diff-empty">无关系变化</p>
+          ) : null}
+        </div>
+      </section>
+      <section className="diff-entity-section">
+        <div className="diff-entity-heading">
+          <h3>分组差异</h3>
+          <span>
+            +{diff.groups.added.length} / -{diff.groups.removed.length} / ~
+            {diff.groups.changed.length}
+          </span>
+        </div>
+        <div className="diff-flat-list">
+          {diff.groups.added.map((group) => (
+            <div className="diff-row diff-row--added" key={`add-group-${group.id}`}>
+              <Plus size={13} />
+              {group.title}
+            </div>
+          ))}
+          {diff.groups.removed.map((group) => (
+            <div className="diff-row diff-row--removed" key={`remove-group-${group.id}`}>
+              <span>-</span>
+              {group.title}
+            </div>
+          ))}
+          {diff.groups.changed.map((entry) => (
+            <div
+              className="diff-row diff-row--changed"
+              key={`change-group-${entry.id}`}
+            >
+              <span>~</span>
+              <span>
+                {entry.before.title} → {entry.after.title}
+                <small>{entry.fields.join("、")}</small>
+              </span>
+            </div>
+          ))}
+          {diff.groups.added.length +
+            diff.groups.removed.length +
+            diff.groups.changed.length ===
+          0 ? (
+            <p className="diff-empty">无分组变化</p>
+          ) : null}
+        </div>
+      </section>
     </Modal>
   );
 }
@@ -374,6 +470,71 @@ export function ShortcutDialog({ onClose }: { onClose: () => void }) {
       <p className="field-hint">
         鼠标拖动节点只改位置；从节点右侧圆点拖到空白创建后继，拖到已有节点建立关系；点击边线可编辑标签。
       </p>
+    </Modal>
+  );
+}
+
+export function BranchConditionsDialog({
+  source,
+  edges,
+  targetTitle,
+  onSave,
+  onClose,
+}: {
+  source: WorkflowNode;
+  edges: WorkflowEdge[];
+  targetTitle: (nodeId: string) => string;
+  onSave: (labels: Record<string, string>) => void;
+  onClose: () => void;
+}) {
+  const [labels, setLabels] = useState<Record<string, string>>(() =>
+    Object.fromEntries(edges.map((edge) => [edge.id, edge.label ?? ""])),
+  );
+  return (
+    <Modal
+      title="分支条件"
+      eyebrow={source.title}
+      onClose={onClose}
+      footer={
+        <>
+          <span className="modal-hint">
+            条件暂存于关系的 label 字段，不改变文件 schema。
+          </span>
+          <button className="button button--quiet" onClick={onClose}>
+            取消
+          </button>
+          <button
+            className="button button--primary"
+            onClick={() => {
+              onSave(labels);
+              onClose();
+            }}
+          >
+            保存全部条件
+          </button>
+        </>
+      }
+    >
+      <div className="branch-condition-list">
+        {edges.map((edge) => (
+          <label key={edge.id}>
+            <span>
+              <GitBranch size={14} />
+              {targetTitle(edge.target)}
+            </span>
+            <input
+              value={labels[edge.id] ?? ""}
+              placeholder="例如：通过、拒绝、金额大于 5000"
+              onChange={(event) =>
+                setLabels((current) => ({
+                  ...current,
+                  [edge.id]: event.target.value,
+                }))
+              }
+            />
+          </label>
+        ))}
+      </div>
     </Modal>
   );
 }

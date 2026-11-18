@@ -7,6 +7,7 @@ import type {
   WorkflowEdge,
   WorkflowGroup,
   WorkflowNode,
+  WorkflowTheme,
 } from "./types";
 
 export const NODE_WIDTH = 224;
@@ -36,7 +37,10 @@ function now(): string {
   return new Date().toISOString();
 }
 
-export function createDocument(title = "未命名工作流"): WorkflowDocument {
+export function createDocument(
+  title = "未命名工作流",
+  theme: WorkflowTheme = "paper",
+): WorkflowDocument {
   const timestamp = now();
   return {
     schemaVersion: 1,
@@ -58,7 +62,7 @@ export function createDocument(title = "未命名工作流"): WorkflowDocument {
     },
     display: {
       showDescriptions: true,
-      theme: "paper",
+      theme,
     },
   };
 }
@@ -177,6 +181,65 @@ export function moveNodes(
   return {
     ...document,
     layout: { ...document.layout, nodes: next },
+  };
+}
+
+export function moveGroup(
+  document: WorkflowDocument,
+  groupId: string,
+  position: Point,
+): WorkflowDocument {
+  const groupLayout = document.layout.groups[groupId];
+  if (!groupLayout) return document;
+  const dx = position.x - groupLayout.x;
+  const dy = position.y - groupLayout.y;
+  if (dx === 0 && dy === 0) return document;
+
+  const nodeIds = new Set(getGroupNodeIds(document, groupId));
+  const groupIds = new Set<string>([groupId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const group of document.groups) {
+      if (
+        group.parentId &&
+        groupIds.has(group.parentId) &&
+        !groupIds.has(group.id)
+      ) {
+        groupIds.add(group.id);
+        group.nodeIds.forEach((nodeId) => nodeIds.add(nodeId));
+        changed = true;
+      }
+    }
+  }
+
+  const nodes = { ...document.layout.nodes };
+  for (const nodeId of nodeIds) {
+    const layout = nodes[nodeId];
+    if (layout) {
+      nodes[nodeId] = {
+        ...layout,
+        x: layout.x + dx,
+        y: layout.y + dy,
+      };
+    }
+  }
+
+  const groups = { ...document.layout.groups };
+  for (const id of groupIds) {
+    const layout = groups[id];
+    if (layout) {
+      groups[id] = {
+        ...layout,
+        x: layout.x + dx,
+        y: layout.y + dy,
+      };
+    }
+  }
+
+  return {
+    ...document,
+    layout: { ...document.layout, nodes, groups },
   };
 }
 
@@ -393,6 +456,16 @@ export function touchDocument(document: WorkflowDocument): WorkflowDocument {
     ...document,
     metadata: { ...document.metadata, updatedAt: now() },
   };
+}
+
+export function workflowContentKey(document: WorkflowDocument): string {
+  return JSON.stringify({
+    ...document,
+    layout: {
+      nodes: document.layout.nodes,
+      groups: document.layout.groups,
+    },
+  });
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

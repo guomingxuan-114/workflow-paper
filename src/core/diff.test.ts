@@ -31,5 +31,60 @@ describe("version diff", () => {
       ),
     ).toBe(true);
   });
+
+  it("reports edge label changes and group membership changes", () => {
+    const base = importSnapshot(sampleImport);
+    const current = structuredClone(base);
+    current.edges[0] = {
+      ...current.edges[0],
+      label: "只在夜间发布",
+    };
+    current.edges[1] = {
+      ...current.edges[1],
+      target: base.nodes[1].id,
+    };
+    current.edges.splice(2, 1);
+    current.edges.push({
+      id: "new-edge",
+      source: base.nodes[1].id,
+      target: base.nodes[2].id,
+      label: "新增关系",
+      origin: "manual",
+    });
+    current.groups[0] = {
+      ...current.groups[0],
+      nodeIds: current.groups[0].nodeIds.slice(0, 1),
+      collapsed: true,
+    };
+    current.groups[1] = {
+      ...current.groups[1],
+      nodeIds: [
+        ...current.groups[1].nodeIds,
+        base.groups[0].nodeIds[1],
+      ],
+    };
+    const diff = compareWorkflowVersions(base, current);
+    expect(diff.edges.changed).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: base.edges[0].id,
+          fields: expect.arrayContaining(["label"]),
+        }),
+      ]),
+    );
+    expect(diff.groups.changed).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: base.groups[0].id,
+          fields: expect.arrayContaining(["collapsed", "nodeIds"]),
+        }),
+      ]),
+    );
+    expect(diff.edges.added.map((edge) => edge.id)).toContain("new-edge");
+    expect(diff.edges.removed).toHaveLength(1);
+    expect(
+      diff.edges.changed.some((entry) => entry.fields.includes("target")),
+    ).toBe(true);
+  });
 });
 

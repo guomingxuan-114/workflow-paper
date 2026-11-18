@@ -1,10 +1,19 @@
-import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
+import {
+  Handle,
+  Position,
+  type Node,
+  type NodeProps,
+} from "@xyflow/react";
 import { GitBranch, Flag, NotebookPen, Play, Square } from "lucide-react";
 import type { WorkflowNode } from "../core/types";
 
 export interface WorkflowNodeData extends Record<string, unknown> {
   node: WorkflowNode;
   showDescription: boolean;
+  onBorderPointerDown: (
+    nodeId: string,
+    event: React.PointerEvent<HTMLDivElement>,
+  ) => void;
 }
 
 export type WorkflowFlowNode = Node<WorkflowNodeData, "workflow">;
@@ -41,14 +50,35 @@ export function WorkflowNodeView({
       data-testid={`node-${node.id}`}
       data-node-title={node.title}
     >
-      {node.type !== "start" ? (
-        <Handle
-          type="target"
-          position={Position.Left}
-          className="node-handle node-handle--target"
-          aria-label="连接到此节点"
+      <Handle
+        id="geometry-target"
+        type="target"
+        position={Position.Left}
+        isConnectable={false}
+        className="node-edge-anchor"
+        aria-hidden="true"
+      />
+      <Handle
+        id="geometry-source"
+        type="source"
+        position={Position.Right}
+        isConnectable={false}
+        className="node-edge-anchor"
+        aria-hidden="true"
+      />
+      {(["top", "right", "bottom", "left"] as const).map((side) => (
+        <div
+          key={side}
+          className={`node-connect-edge node-connect-edge--${side} nodrag nopan`}
+          role="button"
+          tabIndex={-1}
+          aria-label={`从节点${side === "top" ? "上" : side === "right" ? "右" : side === "bottom" ? "下" : "左"}边缘建立连接`}
+          data-connection-border={side}
+          onPointerDown={(event) =>
+            data.onBorderPointerDown(node.id, event)
+          }
         />
-      ) : null}
+      ))}
       <div className="node-topline">
         <span className="node-kind">
           <Icon size={13} strokeWidth={1.8} />
@@ -72,14 +102,6 @@ export function WorkflowNodeView({
           {node.id.replace(/^node-/, "").slice(0, 6)}
         </span>
       </div>
-      {node.type !== "end" && node.type !== "note" ? (
-        <Handle
-          type="source"
-          position={Position.Right}
-          className="node-handle node-handle--source"
-          aria-label="拖动以创建后续节点或关系"
-        />
-      ) : null}
     </article>
   );
 }

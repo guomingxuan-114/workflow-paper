@@ -5,12 +5,14 @@ import {
   createNode,
   duplicateNodes,
   groupNodes,
+  moveGroup,
   moveNodes,
   removeByIds,
   updateNode,
   withNode,
   WorkflowValidationError,
   validateDocument,
+  workflowContentKey,
 } from "./document";
 
 function fixture() {
@@ -90,6 +92,78 @@ describe("workflow document", () => {
       ],
     };
     expect(() => validateDocument(invalid)).toThrow(WorkflowValidationError);
+  });
+
+  it("moves group members and nested groups by the same delta", () => {
+    const { document, first, second } = fixture();
+    const root = groupNodes(document, [first.id], "根分组");
+    const rootId = root.groups[0].id;
+    const nestedId = "nested-group";
+    const prepared: typeof root = {
+      ...root,
+      groups: [
+        root.groups[0],
+        {
+          id: nestedId,
+          title: "嵌套分组",
+          nodeIds: [second.id],
+          parentId: rootId,
+          collapsed: false,
+        },
+      ],
+      layout: {
+        ...root.layout,
+        groups: {
+          ...root.layout.groups,
+          [nestedId]: {
+            x: 360,
+            y: 60,
+            width: 300,
+            height: 200,
+          },
+        },
+      },
+    };
+    const beforeNode = prepared.layout.nodes[second.id];
+    const beforeNested = prepared.layout.groups[nestedId];
+    const rootBefore = prepared.layout.groups[rootId];
+    const moved = moveGroup(prepared, rootId, {
+      x: rootBefore.x + 64,
+      y: rootBefore.y + 48,
+    });
+    expect(moved.layout.nodes[first.id]).toMatchObject({
+      x: prepared.layout.nodes[first.id].x + 64,
+      y: prepared.layout.nodes[first.id].y + 48,
+    });
+    expect(moved.layout.nodes[second.id]).toMatchObject({
+      x: beforeNode.x + 64,
+      y: beforeNode.y + 48,
+    });
+    expect(moved.layout.groups[nestedId]).toMatchObject({
+      x: beforeNested.x + 64,
+      y: beforeNested.y + 48,
+    });
+    expect(moved.layout.groups[rootId]).toMatchObject({
+      x: rootBefore.x + 64,
+      y: rootBefore.y + 48,
+    });
+  });
+
+  it("ignores viewport-only changes in the persisted content key", () => {
+    const { document, first } = fixture();
+    const panned = {
+      ...document,
+      layout: {
+        ...document.layout,
+        viewport: { x: 220, y: -90, zoom: 1.4 },
+      },
+    };
+    expect(workflowContentKey(panned)).toBe(workflowContentKey(document));
+    expect(
+      workflowContentKey(
+        moveNodes(document, { [first.id]: { x: 180, y: 260 } }),
+      ),
+    ).not.toBe(workflowContentKey(document));
   });
 });
 

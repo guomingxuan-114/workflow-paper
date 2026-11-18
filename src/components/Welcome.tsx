@@ -1,11 +1,13 @@
 import { ArrowUpRight, FilePlus2, FolderOpen, Import, Sparkles } from "lucide-react";
 import { PRODUCT } from "../config/product";
+import type { WorkflowTheme } from "../core/types";
 
 interface WelcomeProps {
   onNew: () => void;
   onImportSample: () => void;
   onTemplates: () => void;
   onOpen: () => void;
+  theme: WorkflowTheme;
 }
 
 export function Welcome({
@@ -13,9 +15,10 @@ export function Welcome({
   onImportSample,
   onTemplates,
   onOpen,
+  theme,
 }: WelcomeProps) {
   return (
-    <main className="welcome">
+    <main className="welcome" data-theme={theme}>
       <div className="welcome-ambient welcome-ambient--one" />
       <div className="welcome-ambient welcome-ambient--two" />
       <header className="welcome-header">

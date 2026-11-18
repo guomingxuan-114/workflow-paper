@@ -7,12 +7,10 @@ import {
   MarkerType,
   ReactFlow,
   ReactFlowProvider,
-  type Connection,
+  ViewportPortal,
   type Edge,
   type EdgeChange,
   type NodeChange,
-  type OnConnectEnd,
-  type OnConnectStart,
   type Viewport,
   useReactFlow,
 } from "@xyflow/react";
@@ -24,6 +22,7 @@ import {
   useState,
 } from "react";
 import type {
+  NodeKind,
   Point,
   Selection,
   WorkflowDocument,
@@ -31,8 +30,14 @@ import type {
 import {
   GROUP_PADDING,
   getHiddenNodeIds,
+  moveGroup,
 } from "../core/document";
 import { createNode, withNode, connectNodes } from "../core/document";
+import {
+  buildWorkflowRouting,
+  buildConnectionPreview,
+  distanceToRoute,
+} from "../core/edgeRouting";
 import { GroupNodeView, type GroupFlowNode } from "./GroupNode";
 import {
   WorkflowNodeView,
@@ -55,30 +60,6 @@ const edgeTypes = {
 const groupFlowId = (id: string) => `group:${id}`;
 const semanticGroupId = (id: string) => id.replace(/^group:/, "");
 
-function distanceToSegment(
-  point: Point,
-  start: Point,
-  end: Point,
-): number {
-  const dx = end.x - start.x;
-  const dy = end.y - start.y;
-  if (dx === 0 && dy === 0) {
-    return Math.hypot(point.x - start.x, point.y - start.y);
-  }
-  const projection = Math.max(
-    0,
-    Math.min(
-      1,
-      ((point.x - start.x) * dx + (point.y - start.y) * dy) /
-        (dx * dx + dy * dy),
-    ),
-  );
-  return Math.hypot(
-    point.x - (start.x + projection * dx),
-    point.y - (start.y + projection * dy),
-  );
-}
-
 interface CanvasViewProps {
   document: WorkflowDocument;
   externalNodeIds: string[];
@@ -96,6 +77,8 @@ interface CanvasViewProps {
     groupIds: string[],
   ) => void;
   onEditNode: (nodeId: string) => void;
+  onCreateGroup: () => void;
+  onEditBranches: (sourceId: string) => void;
   onToggleGroup: (groupId: string) => void;
   onViewportChange: (viewport: Viewport) => void;
 }
@@ -109,6 +92,8 @@ function CanvasInner({
   onCheckpoint,
   onSelectionChange,
   onEditNode,
+  onCreateGroup,
+  onEditBranches,
   onToggleGroup,
   onViewportChange,
 }: CanvasViewProps) {
@@ -122,10 +107,11 @@ function CanvasInner({
     y: number;
     flow: Point;
   } | null>(null);
-  const connectionStart = useRef<{
-    x: number;
-    y: number;
-    nodeId: string | null;
+  const [connectionDraft, setConnectionDraft] = useState<{
+    sourceId: string;
+    pointer: Point;
+    targetId?: string;
+    path: string;
   } | null>(null);
   const lastEdgePointerRef = useRef<{ id: string; at: number } | null>(null);
   const selectedEdgeRef = useRef<string | null>(null);
@@ -166,6 +152,21 @@ function CanvasInner({
       document.nodes,
     ],
   );
+  const visibleNodeIds = useMemo(
+    () =>
+      new Set(
+        document.nodes
+          .filter((node) => !hidden.has(node.id))
+          .map((node) => node.id),
+      ),
+    [document.nodes, hidden],
+  );
+  const routing = useMemo(
+    () => buildWorkflowRouting(document, visibleNodeIds),
+    // Viewport-only changes must not rebuild persisted edge geometry.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [graphSyncKey, hidden, visibleNodeIds],
+  );
 
   const handleEdgeSelect = useCallback((edgeId: string) => {
     selectedEdgeRef.current = edgeId;
@@ -177,6 +178,176 @@ function CanvasInner({
     );
     selectionChangeRef.current({ kind: "edge", id: edgeId }, [], [edgeId], []);
   }, []);
+
+  const handleGroupDragStart = useCallback(
+    (groupId: string, clientX: number, clientY: number) => {
+      const initial = document.layout.groups[groupId];
+      if (!initial) return;
+      selectionChangeRef.current(
+        { kind: "group", id: groupId },
+        [],
+        [],
+        [groupId],
+      );
+      let checkpointed = false;
+      const pointerMove = (event: PointerEvent) => {
+        const deltaX = event.clientX - clientX;
+        const deltaY = event.clientY - clientY;
+        if (!checkpointed && Math.hypot(deltaX, deltaY) > 2) {
+          checkpointed = true;
+          onCheckpoint();
+        }
+        if (!checkpointed) return;
+        const zoom = Math.max(0.2, reactFlow.getViewport().zoom);
+        const position = {
+          x: initial.x + deltaX / zoom,
+          y: initial.y + deltaY / zoom,
+        };
+        onApply((current) => moveGroup(current, groupId, position), false);
+      };
+      const pointerUp = () => {
+        window.removeEventListener("pointermove", pointerMove);
+        window.removeEventListener("pointerup", pointerUp);
+        window.removeEventListener("blur", pointerUp);
+      };
+      window.addEventListener("pointermove", pointerMove);
+      window.addEventListener("pointerup", pointerUp, { once: true });
+      window.addEventListener("blur", pointerUp, { once: true });
+    },
+    [document.layout.groups, onApply, onCheckpoint, reactFlow],
+  );
+
+  const handleNodeBorderPointerDown = useCallback(
+    (
+      sourceId: string,
+      event: React.PointerEvent<HTMLDivElement>,
+    ) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const start = reactFlow.screenToFlowPosition({
+        x: event.clientX,
+        y: event.clientY,
+      });
+      const startPreview = buildConnectionPreview(
+        document,
+        sourceId,
+        start,
+      );
+      if (!startPreview) return;
+      selectionChangeRef.current(
+        { kind: "node", id: sourceId },
+        [sourceId],
+        [],
+        [],
+      );
+      setConnectionDraft({
+        sourceId,
+        pointer: start,
+        path: startPreview.path,
+      });
+
+      const nodeAt = (point: Point) =>
+        document.nodes.find((node) => {
+          if (hidden.has(node.id)) return false;
+          const layout = document.layout.nodes[node.id];
+          return (
+            layout &&
+            point.x >= layout.x &&
+            point.x <= layout.x + layout.width &&
+            point.y >= layout.y &&
+            point.y <= layout.y + layout.height
+          );
+        })?.id;
+
+      const pointerMove = (moveEvent: PointerEvent) => {
+        const pointer = reactFlow.screenToFlowPosition({
+          x: moveEvent.clientX,
+          y: moveEvent.clientY,
+        });
+        const hovered = nodeAt(pointer);
+        const targetId = hovered && hovered !== sourceId ? hovered : undefined;
+        const preview =
+          buildConnectionPreview(document, sourceId, pointer, targetId) ??
+          startPreview;
+        setConnectionDraft({
+          sourceId,
+          pointer,
+          targetId,
+          path: preview.path,
+        });
+      };
+
+      const cleanup = () => {
+        window.removeEventListener("pointermove", pointerMove);
+        window.removeEventListener("pointerup", pointerUp);
+        window.removeEventListener("pointercancel", cancel);
+        window.removeEventListener("blur", cancel);
+      };
+      const cancel = () => {
+        cleanup();
+        setConnectionDraft(null);
+      };
+      const pointerUp = (upEvent: PointerEvent) => {
+        cleanup();
+        const pointer = reactFlow.screenToFlowPosition({
+          x: upEvent.clientX,
+          y: upEvent.clientY,
+        });
+        const distance = Math.hypot(pointer.x - start.x, pointer.y - start.y);
+        const hovered = nodeAt(pointer);
+        setConnectionDraft(null);
+        if (distance < 8) return;
+        if (hovered === sourceId) return;
+
+        window.setTimeout(() => {
+          if (hovered) {
+            onApply(
+              (current) =>
+                connectNodes(current, sourceId, hovered, undefined, "manual"),
+              true,
+            );
+            return;
+          }
+
+          const node = createNode("后续步骤", pointer, "task");
+          const sourceGroup = parentByNode.get(sourceId);
+          onApply((current) => {
+            const withNewNode = withNode(current, node, pointer);
+            const withGroup = sourceGroup
+              ? {
+                  ...withNewNode,
+                  groups: withNewNode.groups.map((group) =>
+                    group.id === sourceGroup
+                      ? { ...group, nodeIds: [...group.nodeIds, node.id] }
+                      : group,
+                  ),
+                }
+              : withNewNode;
+            return connectNodes(
+              withGroup,
+              sourceId,
+              node.id,
+              undefined,
+              "manual",
+            );
+          }, true);
+          selectionChangeRef.current(
+            { kind: "node", id: node.id },
+            [node.id],
+            [],
+            [],
+          );
+        }, 0);
+      };
+
+      window.addEventListener("pointermove", pointerMove);
+      window.addEventListener("pointerup", pointerUp, { once: true });
+      window.addEventListener("pointercancel", cancel, { once: true });
+      window.addEventListener("blur", cancel, { once: true });
+    },
+    [document, hidden, onApply, parentByNode, reactFlow],
+  );
 
   useEffect(() => {
     const element = canvasRef.current;
@@ -196,29 +367,14 @@ function CanvasInner({
         y: event.clientY,
       });
       const threshold = 15 / Math.max(0.2, reactFlow.getViewport().zoom);
-      const edge = document.edges.find((candidate) => {
-        const source = document.layout.nodes[candidate.source];
-        const targetLayout = document.layout.nodes[candidate.target];
-        if (!source || !targetLayout) return false;
-        return (
-          distanceToSegment(
-            point,
-            {
-              x: source.x + source.width,
-              y: source.y + source.height / 2,
-            },
-            {
-              x: targetLayout.x,
-              y: targetLayout.y + targetLayout.height / 2,
-            },
-          ) <= threshold
-        );
-      });
+      const edge = Object.values(routing.routes).find(
+        (candidate) => distanceToRoute(point, candidate) <= threshold,
+      );
       if (!edge) return;
       event.preventDefault();
       event.stopPropagation();
-      lastEdgePointerRef.current = { id: edge.id, at: Date.now() };
-      handleEdgeSelect(edge.id);
+      lastEdgePointerRef.current = { id: edge.edgeId, at: Date.now() };
+      handleEdgeSelect(edge.edgeId);
     };
     const click = (event: MouseEvent) => {
       const pending = lastEdgePointerRef.current;
@@ -234,7 +390,7 @@ function CanvasInner({
       element.removeEventListener("pointerdown", pointerDown, true);
       element.removeEventListener("click", click, true);
     };
-  }, [document, handleEdgeSelect, reactFlow]);
+  }, [document, handleEdgeSelect, reactFlow, routing]);
 
   useEffect(() => {
     const nodeSelection = new Set(externalNodeIds);
@@ -266,6 +422,7 @@ function CanvasInner({
           group,
           memberCount: group.nodeIds.length,
           onToggle: onToggleGroup,
+          onDragStart: handleGroupDragStart,
         },
         style: {
           width: group.collapsed ? 286 : Math.max(300, layout?.width ?? 360),
@@ -273,7 +430,7 @@ function CanvasInner({
           zIndex: -10,
         },
         selected: groupSelection.has(groupFlowId(group.id)),
-        draggable: true,
+        draggable: false,
         selectable: true,
         ...(group.parentId ? { parentId: groupFlowId(group.parentId) } : {}),
       });
@@ -301,6 +458,7 @@ function CanvasInner({
         data: {
           node,
           showDescription: document.display.showDescriptions,
+          onBorderPointerDown: handleNodeBorderPointerDown,
         },
         selected: nodeSelection.has(node.id),
         draggable: true,
@@ -312,16 +470,33 @@ function CanvasInner({
     setEdges(
       document.edges
         .filter((edge) => !hidden.has(edge.source) && !hidden.has(edge.target))
-        .map<WorkflowFlowEdge>((edge) => ({
-          id: edge.id,
-          source: edge.source,
-          target: edge.target,
-          type: "workflowEdge",
-          data: { label: edge.label, onSelect: handleEdgeSelect },
-          markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
-          className: "workflow-edge",
-          style: { strokeWidth: 1.5 },
-        })),
+        .flatMap<WorkflowFlowEdge>((edge) => {
+          const route = routing.routes[edge.id];
+          if (!route) return [];
+          return [
+            {
+              id: edge.id,
+              source: edge.source,
+              target: edge.target,
+              sourceHandle: "geometry-source",
+              targetHandle: "geometry-target",
+              type: "workflowEdge",
+              data: {
+                label: edge.label,
+                onSelect: handleEdgeSelect,
+                path: route.path,
+                labelPoint: route.labelPoint,
+              },
+              markerEnd: {
+                type: MarkerType.ArrowClosed,
+                width: 16,
+                height: 16,
+              },
+              className: "workflow-edge",
+              style: { strokeWidth: 1.5 },
+            },
+          ];
+        }),
     );
   }, [
     graphSyncKey,
@@ -329,8 +504,12 @@ function CanvasInner({
     selectedNodeKey,
     hidden,
     handleEdgeSelect,
+    handleGroupDragStart,
+    handleNodeBorderPointerDown,
     onToggleGroup,
     parentByNode,
+    routing,
+    document.edges,
   ]);
 
   useEffect(() => {
@@ -424,19 +603,7 @@ function CanvasInner({
       const position = toGlobal(flowNode);
       if (flowNode.type === "group") {
         const id = semanticGroupId(flowNode.id);
-        onApply((current) => ({
-          ...current,
-          layout: {
-            ...current.layout,
-            groups: {
-              ...current.layout.groups,
-              [id]: {
-                ...current.layout.groups[id],
-                ...position,
-              },
-            },
-          },
-        }), false);
+        onApply((current) => moveGroup(current, id, position), false);
         return;
       }
       onApply((current) => ({
@@ -458,122 +625,6 @@ function CanvasInner({
     [document, onApply],
   );
 
-  const onConnect = useCallback(
-    (connection: Connection) => {
-      if (!connection.source || !connection.target) return;
-      onApply(
-        (current) =>
-          connectNodes(
-            current,
-            connection.source!,
-            connection.target!,
-            undefined,
-            "manual",
-          ),
-        true,
-      );
-    },
-    [onApply],
-  );
-
-  const onConnectStart: OnConnectStart = useCallback((event, params) => {
-    connectionStart.current = {
-      x: "clientX" in event ? event.clientX : 0,
-      y: "clientY" in event ? event.clientY : 0,
-      nodeId: params.nodeId,
-    };
-  }, []);
-
-  const onConnectEnd: OnConnectEnd = useCallback(
-    (event) => {
-      const start = connectionStart.current;
-      connectionStart.current = null;
-      if (!start?.nodeId) return;
-      const clientX = "clientX" in event ? event.clientX : start.x;
-      const clientY = "clientY" in event ? event.clientY : start.y;
-      if (Math.hypot(clientX - start.x, clientY - start.y) < 28) return;
-      if (document.groups.some((group) => groupFlowId(group.id) === start.nodeId)) {
-        return;
-      }
-      const flowPosition = reactFlow.screenToFlowPosition({
-        x: clientX,
-        y: clientY,
-      });
-      const parent = parentByNode.get(start.nodeId);
-      const parentLayout = parent ? document.layout.groups[parent] : null;
-      const position = parentLayout
-        ? { x: flowPosition.x - parentLayout.x, y: flowPosition.y - parentLayout.y }
-        : flowPosition;
-      // React Flow reports a successful target connection through onConnect.
-      // A drop at least 28px away lands here and creates a successor.
-      const target = document.nodes.find((node) => {
-        const layout = document.layout.nodes[node.id];
-        return (
-          layout &&
-          flowPosition.x >= layout.x &&
-          flowPosition.x <= layout.x + layout.width &&
-          flowPosition.y >= layout.y &&
-          flowPosition.y <= layout.y + layout.height
-        );
-      });
-      if (target) return;
-      // React Flow is still finalizing its connection store in this event
-      // stack. Commit on the next task so its controlled node state can settle.
-      window.setTimeout(() => {
-        if (parent && parentLayout) {
-          const node = createNode(
-            "后续步骤",
-            { x: position.x, y: position.y },
-            "task",
-          );
-          onApply((current) => {
-            const withNewNode = withNode(current, node, {
-              x: flowPosition.x,
-              y: flowPosition.y,
-            });
-            return {
-              ...withNewNode,
-              groups: withNewNode.groups.map((group) =>
-                group.id === parent
-                  ? { ...group, nodeIds: [...group.nodeIds, node.id] }
-                  : group,
-              ),
-              edges: [
-                ...withNewNode.edges,
-                {
-                  id: `edge-${node.id}`,
-                  source: start.nodeId!,
-                  target: node.id,
-                  origin: "manual" as const,
-                },
-              ],
-            };
-          }, true);
-        } else {
-          const node = createNode(
-            "后续步骤",
-            { x: flowPosition.x, y: flowPosition.y },
-            "task",
-          );
-          onApply((current) => {
-            const withNewNode = withNode(current, node, {
-              x: flowPosition.x,
-              y: flowPosition.y,
-            });
-            return connectNodes(
-              withNewNode,
-              start.nodeId!,
-              node.id,
-              undefined,
-              "manual",
-            );
-          }, true);
-        }
-      }, 0);
-    },
-    [document, onApply, parentByNode, reactFlow],
-  );
-
   const openContextMenu = useCallback(
     (event: MouseEvent | React.MouseEvent) => {
       event.preventDefault();
@@ -581,9 +632,34 @@ function CanvasInner({
         x: event.clientX,
         y: event.clientY,
       });
-      setContextMenu({ x: event.clientX, y: event.clientY, flow });
+      const menuWidth = 198;
+      const menuHeight = 288;
+      setContextMenu({
+        x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+        y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+        flow,
+      });
     },
     [reactFlow],
+  );
+
+  const createNodeFromContextMenu = useCallback(
+    (type: NodeKind, title: string) => {
+      if (!contextMenu) return;
+      const node = createNode(title, contextMenu.flow, type);
+      onApply(
+        (current) => withNode(current, node, contextMenu.flow),
+        true,
+      );
+      onSelectionChange(
+        { kind: "node", id: node.id },
+        [node.id],
+        [],
+        [],
+      );
+      setContextMenu(null);
+    },
+    [contextMenu, onApply, onSelectionChange],
   );
 
   return (
@@ -599,9 +675,6 @@ function CanvasInner({
         edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
-        onConnect={onConnect}
-        onConnectStart={onConnectStart}
-        onConnectEnd={onConnectEnd}
         onNodeDragStart={onCheckpoint}
         onNodeDragStop={handleNodeDragStop}
         onNodeDoubleClick={(_event, node) => {
@@ -623,6 +696,7 @@ function CanvasInner({
         onPaneContextMenu={openContextMenu}
         onSelectionChange={handleSelectionChange}
         onMoveEnd={(_event, viewport) => onViewportChange(viewport)}
+        colorMode={document.display.theme === "dark" ? "dark" : "light"}
         minZoom={0.2}
         maxZoom={2}
         snapToGrid
@@ -640,9 +714,66 @@ function CanvasInner({
           variant={BackgroundVariant.Dots}
           gap={22}
           size={1}
-          color="#d8d3c8"
+          color={
+            document.display.theme === "dark" ? "#4a5048" : "#d8d3c8"
+          }
         />
         <Controls showInteractive={false} position="bottom-right" />
+        <ViewportPortal>
+          {Object.values(routing.branches).map((branch) => {
+            const source = document.nodes.find(
+              (node) => node.id === branch.sourceId,
+            );
+            return (
+              <button
+                key={branch.sourceId}
+                className="branch-point nodrag nopan"
+                style={{
+                  transform: `translate(${branch.point.x}px, ${branch.point.y}px)`,
+                }}
+                aria-label={`编辑分支条件：${source?.title ?? branch.sourceId}`}
+                title="编辑该节点的全部出口条件"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onEditBranches(branch.sourceId);
+                }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onEditBranches(branch.sourceId);
+                }}
+              >
+                {branch.edgeIds.length}
+              </button>
+            );
+          })}
+          {connectionDraft ? (
+            <>
+              <svg className="connection-preview-layer" aria-hidden="true">
+                <path
+                  className="connection-preview-path"
+                  d={connectionDraft.path}
+                />
+              </svg>
+              {connectionDraft.targetId
+                ? (() => {
+                    const target =
+                      document.layout.nodes[connectionDraft.targetId];
+                    return target ? (
+                      <div
+                        className="connection-target-outline"
+                        style={{
+                          transform: `translate(${target.x}px, ${target.y}px)`,
+                          width: target.width,
+                          height: target.height,
+                        }}
+                      />
+                    ) : null;
+                  })()
+                : null}
+            </>
+          ) : null}
+        </ViewportPortal>
         {document.nodes.length === 0 && document.groups.length === 0 ? (
           <div className="canvas-empty-guide">
             <div className="empty-guide-mark">+</div>
@@ -664,34 +795,28 @@ function CanvasInner({
           style={{ left: contextMenu.x, top: contextMenu.y }}
           role="menu"
         >
-          <button
-            role="menuitem"
-            onClick={() => {
-              const node = createNode(
-                "新步骤",
-                contextMenu.flow,
-                document.nodes.length === 0 ? "start" : "task",
-              );
-              onApply(
-                (current) => withNode(current, node, contextMenu.flow),
-                true,
-              );
-              onSelectionChange(
-                { kind: "node", id: node.id },
-                [node.id],
-                [],
-                [],
-              );
-              setContextMenu(null);
-            }}
-          >
+          <button role="menuitem" onClick={() => createNodeFromContextMenu("task", "新步骤")}>
             新建步骤
             <kbd>Tab</kbd>
           </button>
+          <button role="menuitem" onClick={() => createNodeFromContextMenu("decision", "新判断")}>
+            新建判断
+          </button>
+          <button role="menuitem" onClick={() => createNodeFromContextMenu("milestone", "新里程碑")}>
+            新建里程碑
+          </button>
+          <button role="menuitem" onClick={() => createNodeFromContextMenu("end", "结束")}>
+            新建结束
+          </button>
+          <button role="menuitem" onClick={() => createNodeFromContextMenu("note", "备注")}>
+            新建备注
+          </button>
+          <span className="context-menu-divider" />
           <button
             role="menuitem"
             disabled={externalNodeIds.length === 0}
             onClick={() => {
+              onCreateGroup();
               setContextMenu(null);
             }}
           >

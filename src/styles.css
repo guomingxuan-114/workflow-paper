@@ -362,6 +362,7 @@ kbd {
   display: grid;
   grid-template-rows: 54px 42px minmax(0, 1fr);
   background: var(--paper);
+  color: var(--ink);
 }
 
 .topbar {
@@ -787,6 +788,11 @@ kbd {
   cursor: grabbing;
 }
 
+.react-flow__viewport-portal {
+  z-index: 6;
+  pointer-events: none;
+}
+
 .react-flow__controls {
   overflow: hidden;
   border: 1px solid var(--line) !important;
@@ -941,6 +947,111 @@ kbd {
     opacity 120ms ease;
 }
 
+.node-connect-edge {
+  position: absolute;
+  z-index: 4;
+  border-radius: 9px;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.node-edge-anchor {
+  width: 1px !important;
+  height: 1px !important;
+  min-width: 1px !important;
+  min-height: 1px !important;
+  opacity: 0 !important;
+  border: 0 !important;
+  pointer-events: none !important;
+}
+
+.node-connect-edge--top,
+.node-connect-edge--bottom {
+  left: 0;
+  right: 0;
+  height: 10px;
+}
+
+.node-connect-edge--top {
+  top: -5px;
+}
+
+.node-connect-edge--bottom {
+  bottom: -5px;
+}
+
+.node-connect-edge--left,
+.node-connect-edge--right {
+  top: 0;
+  bottom: 0;
+  width: 10px;
+}
+
+.node-connect-edge--left {
+  left: -5px;
+}
+
+.node-connect-edge--right {
+  right: -5px;
+}
+
+.workflow-node:hover .node-connect-edge {
+  background: rgba(111, 133, 101, 0.08);
+}
+
+.connection-preview-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.connection-preview-path {
+  fill: none;
+  stroke: #58704e;
+  stroke-width: 2.2;
+  stroke-dasharray: 7 5;
+  filter: drop-shadow(0 1px 2px rgba(53, 66, 49, 0.18));
+}
+
+.connection-target-outline {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border: 2px solid #5f7954;
+  border-radius: 11px;
+  background: rgba(111, 133, 101, 0.08);
+  pointer-events: none;
+}
+
+.branch-point {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 23px;
+  height: 23px;
+  margin: -11px 0 0 -11px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #788b6d;
+  border-radius: 50%;
+  background: #f8f7f1;
+  color: #596d50;
+  box-shadow: 0 2px 6px rgba(54, 66, 49, 0.14);
+  font-size: 8px;
+  font-weight: 700;
+  cursor: context-menu;
+  z-index: 8;
+  pointer-events: auto;
+}
+
+.branch-point:hover {
+  background: #e5ecdf;
+}
+
 .workflow-node:hover .node-handle,
 .workflow-node.is-selected .node-handle {
   width: 11px !important;
@@ -984,8 +1095,12 @@ kbd {
   cursor: grab;
 }
 
+.group-titlebar:active {
+  cursor: grabbing;
+}
+
 .react-flow__node-group {
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .group-titlebar strong {
@@ -1154,6 +1269,13 @@ kbd {
 
 .context-menu button:disabled {
   opacity: 0.4;
+}
+
+.context-menu-divider {
+  display: block;
+  height: 1px;
+  margin: 4px;
+  background: var(--line);
 }
 
 /* Inspector */
@@ -1716,6 +1838,27 @@ kbd {
   font-size: 9.5px;
 }
 
+.branch-condition-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.branch-condition-list label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--ink-soft);
+  font-size: 9.5px;
+}
+
+.branch-condition-list label > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+}
+
 .diff-summary {
   display: flex;
   gap: 7px;
@@ -1803,6 +1946,37 @@ kbd {
   font-size: 9px;
 }
 
+.diff-entity-section {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #e7e2d9;
+}
+
+.diff-entity-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.diff-entity-heading h3 {
+  margin: 0;
+  font-size: 10px;
+}
+
+.diff-entity-heading > span {
+  color: var(--ink-faint);
+  font-family: Consolas, monospace;
+  font-size: 8px;
+}
+
+.diff-flat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .toast-stack {
   position: fixed;
   z-index: 700;
@@ -1835,6 +2009,247 @@ kbd {
 
 .toast--error {
   background: #75483e;
+}
+
+/* Dark editor theme */
+
+.app-shell[data-theme="dark"],
+.welcome[data-theme="dark"] {
+  color: var(--ink);
+  color-scheme: dark;
+  --paper: #1d201d;
+  --paper-deep: #242823;
+  --surface: #282d27;
+  --ink: #eeeade;
+  --ink-soft: #bbb6aa;
+  --ink-faint: #8f897d;
+  --line: #3b413a;
+  --line-strong: #50574d;
+  --sage: #9eb391;
+  --sage-soft: #303a2e;
+  --sand: #c2aa7c;
+  --sand-soft: #3c3428;
+  --rust: #d18d7d;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow: 0 18px 45px rgba(0, 0, 0, 0.34);
+  background: var(--paper);
+}
+
+.app-shell[data-theme="dark"] .topbar {
+  border-color: var(--line);
+  background: rgba(29, 32, 29, 0.98);
+}
+
+.app-shell[data-theme="dark"] .commandbar {
+  border-color: var(--line);
+  background: #222520;
+}
+
+.app-shell[data-theme="dark"] .topbar-center {
+  border-color: #434940;
+  background: #252924;
+}
+
+.app-shell[data-theme="dark"] .topbar-center button.is-active {
+  background: #363c35;
+  color: #f0ede4;
+}
+
+.app-shell[data-theme="dark"] .commandbar button:hover:not(:disabled),
+.app-shell[data-theme="dark"] .icon-button:hover {
+  background: #343a33;
+  color: #f0ede4;
+}
+
+.app-shell[data-theme="dark"] .sidebar,
+.app-shell[data-theme="dark"] .inspector {
+  border-color: var(--line);
+  background: #20231f;
+}
+
+.app-shell[data-theme="dark"] .sidebar-tabs,
+.app-shell[data-theme="dark"] .sidebar-head,
+.app-shell[data-theme="dark"] .sidebar-footer,
+.app-shell[data-theme="dark"] .inspector-actions {
+  border-color: var(--line);
+}
+
+.app-shell[data-theme="dark"] .sidebar-tabs button.is-active,
+.app-shell[data-theme="dark"] .outline-group-title:hover,
+.app-shell[data-theme="dark"] .outline-group-title.is-selected,
+.app-shell[data-theme="dark"] .outline-row:hover {
+  background: #30352f;
+  color: #ece8de;
+}
+
+.app-shell[data-theme="dark"] .outline-row.is-selected {
+  background: #374332;
+  color: #e7ede1;
+}
+
+.app-shell[data-theme="dark"] .main-stage,
+.app-shell[data-theme="dark"] .react-flow {
+  background: #191c19;
+}
+
+.app-shell[data-theme="dark"] .react-flow__controls {
+  border-color: var(--line) !important;
+}
+
+.app-shell[data-theme="dark"] .react-flow__controls-button {
+  border-color: var(--line) !important;
+  background: #292e28 !important;
+  color: #d5d1c6;
+  fill: #d5d1c6;
+}
+
+.app-shell[data-theme="dark"] .workflow-node {
+  border-color: #4d554b;
+  background: #292e29;
+  box-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.25),
+    0 8px 18px rgba(0, 0, 0, 0.18);
+}
+
+.app-shell[data-theme="dark"] .workflow-node h3 {
+  color: #f2eee4;
+}
+
+.app-shell[data-theme="dark"] .workflow-node p,
+.app-shell[data-theme="dark"] .node-kind,
+.app-shell[data-theme="dark"] .node-footer {
+  color: #aaa598;
+}
+
+.app-shell[data-theme="dark"] .workflow-node--start,
+.app-shell[data-theme="dark"] .workflow-node--end {
+  border-color: #697c61;
+  background: #283326;
+}
+
+.app-shell[data-theme="dark"] .workflow-node--decision,
+.app-shell[data-theme="dark"] .workflow-node--milestone {
+  border-color: #796b54;
+  background: #332d24;
+}
+
+.app-shell[data-theme="dark"] .workflow-node--note {
+  border-color: #68603f;
+  background: #332f20;
+}
+
+.app-shell[data-theme="dark"] .node-footer {
+  border-color: #3c433a;
+}
+
+.app-shell[data-theme="dark"] .workflow-group {
+  background: rgba(54, 68, 50, 0.52);
+  color: #b8c7b0;
+}
+
+.app-shell[data-theme="dark"] .workflow-group--sand {
+  background: rgba(74, 61, 42, 0.55);
+  color: #d0bd9b;
+}
+
+.app-shell[data-theme="dark"] .group-titlebar,
+.app-shell[data-theme="dark"] .group-collapsed-summary {
+  background: rgba(39, 44, 38, 0.94);
+  color: #c7cfc1;
+}
+
+.app-shell[data-theme="dark"] .edge-label,
+.app-shell[data-theme="dark"] .branch-point {
+  border-color: #50584d;
+  background: #292e28;
+  color: #d8d2c5;
+}
+
+.app-shell[data-theme="dark"] .connection-target-outline {
+  border-color: #a4bc97;
+  background: rgba(126, 153, 113, 0.12);
+}
+
+.app-shell[data-theme="dark"] .connection-preview-path {
+  stroke: #b1c6a5;
+}
+
+.app-shell[data-theme="dark"] .canvas-navigation-hint {
+  border-color: #414740;
+  background: rgba(32, 36, 31, 0.9);
+  color: #928d82;
+}
+
+.app-shell[data-theme="dark"] .context-menu,
+.app-shell[data-theme="dark"] .modal-card {
+  border-color: #4a5048;
+  background: #272c26;
+}
+
+.app-shell[data-theme="dark"] .context-menu button:hover:not(:disabled),
+.app-shell[data-theme="dark"] .find-results button:hover,
+.app-shell[data-theme="dark"] .inspector-actions button:hover {
+  background: #353b34;
+}
+
+.app-shell[data-theme="dark"] input,
+.app-shell[data-theme="dark"] textarea,
+.app-shell[data-theme="dark"] select {
+  border-color: #484e46;
+  background: #20241f;
+  color: #eeeade;
+}
+
+.app-shell[data-theme="dark"] .modal-header,
+.app-shell[data-theme="dark"] .modal-footer,
+.app-shell[data-theme="dark"] .inspector-empty-legend,
+.app-shell[data-theme="dark"] .diff-entity-section {
+  border-color: #3f453e;
+}
+
+.app-shell[data-theme="dark"] .modal-backdrop {
+  background: rgba(5, 7, 5, 0.62);
+}
+
+.app-shell[data-theme="dark"] .field-readonly code,
+.app-shell[data-theme="dark"] .source-block code,
+.app-shell[data-theme="dark"] .source-block strong {
+  color: #d3cec2;
+}
+
+.app-shell[data-theme="dark"] .source-block,
+.app-shell[data-theme="dark"] .import-guide pre,
+.app-shell[data-theme="dark"] .diff-columns section {
+  border-color: #424840;
+  background: #222620;
+}
+
+.app-shell[data-theme="dark"] .toast {
+  border-color: #50584d;
+  background: #313831;
+}
+
+.welcome[data-theme="dark"] {
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    var(--paper);
+  background-size: 34px 34px;
+}
+
+.welcome[data-theme="dark"] .welcome-hero > p,
+.welcome[data-theme="dark"] .welcome-footer {
+  color: var(--ink-soft);
+}
+
+.welcome[data-theme="dark"] .start-card {
+  border-color: var(--line);
+  background: rgba(40, 45, 39, 0.88);
+}
+
+.welcome[data-theme="dark"] .start-card--primary {
+  border-color: #687d61;
+  background: linear-gradient(145deg, #303a2d, #252a24);
 }
 
 @keyframes fade-in {

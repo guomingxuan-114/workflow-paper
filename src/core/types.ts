@@ -16,6 +16,8 @@ export interface Size {
   height: number;
 }
 
+export type WorkflowTheme = "paper" | "dark";
+
 export interface ImportedOrigin {
   kind: "import";
   system: string;
@@ -104,7 +106,7 @@ export interface WorkflowDocument {
   layout: WorkflowLayout;
   display: {
     showDescriptions: boolean;
-    theme: "paper";
+    theme: WorkflowTheme;
   };
 }
 
@@ -177,6 +179,26 @@ export interface VersionDiff {
     after: WorkflowNode;
     fields: string[];
   }>;
+  edges: {
+    added: WorkflowEdge[];
+    removed: WorkflowEdge[];
+    changed: Array<{
+      id: string;
+      before: WorkflowEdge;
+      after: WorkflowEdge;
+      fields: string[];
+    }>;
+  };
+  groups: {
+    added: WorkflowGroup[];
+    removed: WorkflowGroup[];
+    changed: Array<{
+      id: string;
+      before: WorkflowGroup;
+      after: WorkflowGroup;
+      fields: string[];
+    }>;
+  };
 }
 
 export type Selection =

@@ -1,39 +1,30 @@
 import {
   BaseEdge,
   EdgeLabelRenderer,
-  getSmoothStepPath,
   type Edge,
   type EdgeProps,
 } from "@xyflow/react";
+import type { Point } from "../core/types";
 
 export interface WorkflowEdgeData extends Record<string, unknown> {
   label?: string;
   onSelect: (edgeId: string) => void;
+  path: string;
+  labelPoint: Point;
 }
 
 export type WorkflowFlowEdge = Edge<WorkflowEdgeData, "workflowEdge">;
 
 export function WorkflowEdgeView({
   id,
-  sourceX,
-  sourceY,
-  targetX,
-  targetY,
-  sourcePosition,
-  targetPosition,
+  source,
+  target,
   markerEnd,
   style,
   selected,
   data,
 }: EdgeProps<WorkflowFlowEdge>) {
-  const [path, labelX, labelY] = getSmoothStepPath({
-    sourceX,
-    sourceY,
-    targetX,
-    targetY,
-    sourcePosition,
-    targetPosition,
-  });
+  const path = data?.path ?? "";
   return (
     <>
       <BaseEdge
@@ -49,6 +40,8 @@ export function WorkflowEdgeView({
         stroke="transparent"
         strokeWidth={18}
         className="workflow-edge-hitarea"
+        data-edge-source={source}
+        data-edge-target={target}
         style={{ pointerEvents: "stroke", cursor: "pointer" }}
         onPointerDown={(event) => {
           event.stopPropagation();
@@ -64,7 +57,7 @@ export function WorkflowEdgeView({
           <button
             className="edge-label nodrag nopan"
             style={{
-              transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+              transform: `translate(-50%, -50%) translate(${data.labelPoint.x}px, ${data.labelPoint.y}px)`,
               zIndex: 20,
             }}
             onClick={(event) => {
