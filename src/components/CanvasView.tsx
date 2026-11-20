@@ -28,16 +28,28 @@ import type {
   WorkflowDocument,
 } from "../core/types";
 import {
+  addNodeToEdgeEndpointGroup,
   GROUP_PADDING,
   getHiddenNodeIds,
   moveGroup,
+  moveNodes,
+  removeNodeFromGroup,
+  splitEdge,
 } from "../core/document";
 import { createNode, withNode, connectNodes } from "../core/document";
 import {
   buildWorkflowRouting,
   buildConnectionPreview,
+  buildFreePreviewPath,
+  documentWithNodePositions,
   distanceToRoute,
+  projectPointOntoRoute,
+  progressAlongRoute,
+  type EdgeRoute,
+  type RouteSide,
+  type RoutingCache,
 } from "../core/edgeRouting";
+import { boundaryPointToward } from "../core/nodeShapes";
 import { GroupNodeView, type GroupFlowNode } from "./GroupNode";
 import {
   WorkflowNodeView,
@@ -59,6 +71,23 @@ const edgeTypes = {
 
 const groupFlowId = (id: string) => `group:${id}`;
 const semanticGroupId = (id: string) => id.replace(/^group:/, "");
+
+function connectFromNodeBorder(
+  document: WorkflowDocument,
+  sourceId: string,
+  targetId: string,
+): WorkflowDocument {
+  return connectNodes(document, sourceId, targetId, undefined, "manual");
+}
+
+function previewSideToward(start: Point, end: Point): RouteSide {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  if (Math.abs(dx) >= Math.abs(dy)) {
+    return dx >= 0 ? "right" : "left";
+  }
+  return dy >= 0 ? "bottom" : "top";
+}
 
 interface CanvasViewProps {
   document: WorkflowDocument;
@@ -113,6 +142,32 @@ function CanvasInner({
     targetId?: string;
     path: string;
   } | null>(null);
+  const [edgeBranchDraft, setEdgeBranchDraft] = useState<{
+    path: string;
+    breakPoint: Point;
+    pointer: Point;
+    targetId?: string;
+  } | null>(null);
+  const [edgeContextMenu, setEdgeContextMenu] = useState<{
+    edgeId: string;
+    x: number;
+    y: number;
+    flow: Point;
+  } | null>(null);
+  const routingCacheRef = useRef<RoutingCache>(new Map());
+  const [renderQuality, setRenderQuality] = useState<
+    "full" | "simplified"
+  >("full");
+  const qualityStatsRef = useRef({
+    slowFrames: 0,
+    fastFrames: 0,
+    cooldownUntil: 0,
+  });
+  const pendingNodePositionsRef = useRef<Record<string, Point>>({});
+  const liveNodePositionsRef = useRef<Record<string, Point>>({});
+  const nodeDragActiveRef = useRef(false);
+  const nodeDragFrameRef = useRef<number | null>(null);
+  const qualityRestoreTimerRef = useRef<number | null>(null);
   const lastEdgePointerRef = useRef<{ id: string; at: number } | null>(null);
   const selectedEdgeRef = useRef<string | null>(null);
   const reactFlow = useReactFlow();
@@ -162,11 +217,65 @@ function CanvasInner({
     [document.nodes, hidden],
   );
   const routing = useMemo(
-    () => buildWorkflowRouting(document, visibleNodeIds),
+    () =>
+      buildWorkflowRouting(
+        document,
+        visibleNodeIds,
+        routingCacheRef.current,
+      ),
     // Viewport-only changes must not rebuild persisted edge geometry.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [graphSyncKey, hidden, visibleNodeIds],
   );
+
+  const beginRealtime = useCallback(() => {
+    qualityStatsRef.current.slowFrames = 0;
+    qualityStatsRef.current.fastFrames = 0;
+    if (qualityRestoreTimerRef.current !== null) {
+      window.clearTimeout(qualityRestoreTimerRef.current);
+      qualityRestoreTimerRef.current = null;
+    }
+  }, []);
+
+  const noteFrameCost = useCallback((startedAt: number) => {
+    const now = performance.now();
+    const cost = now - startedAt;
+    const stats = qualityStatsRef.current;
+    if (cost > 18) {
+      stats.slowFrames += 1;
+      stats.fastFrames = 0;
+    } else if (cost < 8) {
+      stats.fastFrames += 1;
+    }
+    if (
+      renderQuality === "full" &&
+      stats.slowFrames >= 3 &&
+      now >= stats.cooldownUntil
+    ) {
+      stats.cooldownUntil = now + 1500;
+      setRenderQuality("simplified");
+    } else if (
+      renderQuality === "simplified" &&
+      now >= stats.cooldownUntil &&
+      stats.fastFrames >= 20
+    ) {
+      setRenderQuality("full");
+      stats.slowFrames = 0;
+      stats.fastFrames = 0;
+    }
+  }, [renderQuality]);
+
+  const finishRealtime = useCallback(() => {
+    if (qualityRestoreTimerRef.current !== null) {
+      window.clearTimeout(qualityRestoreTimerRef.current);
+    }
+    qualityRestoreTimerRef.current = window.setTimeout(() => {
+      setRenderQuality("full");
+      qualityStatsRef.current.slowFrames = 0;
+      qualityStatsRef.current.fastFrames = 0;
+      qualityRestoreTimerRef.current = null;
+    }, 1500);
+  }, []);
 
   const handleEdgeSelect = useCallback((edgeId: string) => {
     selectedEdgeRef.current = edgeId;
@@ -190,6 +299,9 @@ function CanvasInner({
         [groupId],
       );
       let checkpointed = false;
+      let pending: Point | null = null;
+      let frame: number | null = null;
+      beginRealtime();
       const pointerMove = (event: PointerEvent) => {
         const deltaX = event.clientX - clientX;
         const deltaY = event.clientY - clientY;
@@ -203,24 +315,51 @@ function CanvasInner({
           x: initial.x + deltaX / zoom,
           y: initial.y + deltaY / zoom,
         };
-        onApply((current) => moveGroup(current, groupId, position), false);
+        pending = position;
+        if (frame === null) {
+          frame = window.requestAnimationFrame(() => {
+            const startedAt = performance.now();
+            frame = null;
+            if (pending) {
+              const next = pending;
+              onApply((current) => moveGroup(current, groupId, next), false);
+            }
+            noteFrameCost(startedAt);
+          });
+        }
       };
       const pointerUp = () => {
         window.removeEventListener("pointermove", pointerMove);
         window.removeEventListener("pointerup", pointerUp);
         window.removeEventListener("blur", pointerUp);
+        if (frame !== null) {
+          window.cancelAnimationFrame(frame);
+          frame = null;
+        }
+        if (pending) {
+          onApply((current) => moveGroup(current, groupId, pending!), false);
+        }
+        finishRealtime();
       };
       window.addEventListener("pointermove", pointerMove);
       window.addEventListener("pointerup", pointerUp, { once: true });
       window.addEventListener("blur", pointerUp, { once: true });
     },
-    [document.layout.groups, onApply, onCheckpoint, reactFlow],
+    [
+      beginRealtime,
+      document.layout.groups,
+      finishRealtime,
+      noteFrameCost,
+      onApply,
+      onCheckpoint,
+      reactFlow,
+    ],
   );
 
   const handleNodeBorderPointerDown = useCallback(
     (
       sourceId: string,
-      event: React.PointerEvent<HTMLDivElement>,
+      event: React.PointerEvent<Element>,
     ) => {
       if (event.button !== 0) return;
       event.preventDefault();
@@ -235,12 +374,6 @@ function CanvasInner({
         start,
       );
       if (!startPreview) return;
-      selectionChangeRef.current(
-        { kind: "node", id: sourceId },
-        [sourceId],
-        [],
-        [],
-      );
       setConnectionDraft({
         sourceId,
         pointer: start,
@@ -250,6 +383,7 @@ function CanvasInner({
       const nodeAt = (point: Point) =>
         document.nodes.find((node) => {
           if (hidden.has(node.id)) return false;
+          if (node.type === "fork") return false;
           const layout = document.layout.nodes[node.id];
           return (
             layout &&
@@ -304,13 +438,17 @@ function CanvasInner({
           if (hovered) {
             onApply(
               (current) =>
-                connectNodes(current, sourceId, hovered, undefined, "manual"),
+                connectFromNodeBorder(
+                  current,
+                  sourceId,
+                  hovered,
+                ),
               true,
             );
             return;
           }
 
-          const node = createNode("后续步骤", pointer, "task");
+          const node = createNode("未命名节点", pointer, "task");
           const sourceGroup = parentByNode.get(sourceId);
           onApply((current) => {
             const withNewNode = withNode(current, node, pointer);
@@ -324,12 +462,10 @@ function CanvasInner({
                   ),
                 }
               : withNewNode;
-            return connectNodes(
+            return connectFromNodeBorder(
               withGroup,
               sourceId,
               node.id,
-              undefined,
-              "manual",
             );
           }, true);
           selectionChangeRef.current(
@@ -349,6 +485,204 @@ function CanvasInner({
     [document, hidden, onApply, parentByNode, reactFlow],
   );
 
+  const startEdgeDerivation = useCallback(
+    (
+      edgeId: string,
+      event: React.PointerEvent<Element>,
+      onTap?: () => void,
+    ) => {
+      const originEdge = document.edges.find((edge) => edge.id === edgeId);
+      if (!originEdge) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const start = reactFlow.screenToFlowPosition({
+        x: event.clientX,
+        y: event.clientY,
+      });
+      const route = routing.routes[edgeId];
+      const projected = route
+        ? projectPointOntoRoute(start, route)
+        : { point: start, progress: 0.5, distance: 0 };
+      const breakPoint = projected.point;
+      setEdgeBranchDraft({
+        path: buildFreePreviewPath(breakPoint, breakPoint),
+        breakPoint,
+        pointer: start,
+      });
+      let pendingPointer = start;
+      let frame: number | null = null;
+      let moved = false;
+
+      const nodeAt = (point: Point) =>
+        document.nodes.find((node) => {
+          if (hidden.has(node.id)) return false;
+          const layout = document.layout.nodes[node.id];
+          return (
+            layout &&
+            point.x >= layout.x &&
+            point.x <= layout.x + layout.width &&
+            point.y >= layout.y &&
+            point.y <= layout.y + layout.height
+          );
+        })?.id;
+
+      const renderPreview = () => {
+        frame = null;
+        const targetId = nodeAt(pendingPointer);
+        const target = targetId
+          ? document.nodes.find((node) => node.id === targetId)
+          : undefined;
+        const targetLayout = targetId
+          ? document.layout.nodes[targetId]
+          : undefined;
+        const endPoint =
+          target && targetLayout
+            ? boundaryPointToward(target, targetLayout, breakPoint)
+            : pendingPointer;
+        const side = previewSideToward(breakPoint, endPoint);
+        setEdgeBranchDraft({
+          path: buildFreePreviewPath(breakPoint, endPoint, side),
+          breakPoint,
+          pointer: pendingPointer,
+          targetId,
+        });
+      };
+
+      const pointerMove = (moveEvent: PointerEvent) => {
+        pendingPointer = reactFlow.screenToFlowPosition({
+          x: moveEvent.clientX,
+          y: moveEvent.clientY,
+        });
+        if (!moved) {
+          moved =
+            Math.hypot(
+              pendingPointer.x - start.x,
+              pendingPointer.y - start.y,
+            ) > 8;
+        }
+        if (moved && frame === null) {
+          frame = window.requestAnimationFrame(renderPreview);
+        }
+      };
+
+      const cleanup = () => {
+        window.removeEventListener("pointermove", pointerMove);
+        window.removeEventListener("pointerup", pointerUp);
+        window.removeEventListener("pointercancel", cancel);
+        window.removeEventListener("blur", cancel);
+        if (frame !== null) window.cancelAnimationFrame(frame);
+      };
+      const cancel = () => {
+        cleanup();
+        setEdgeBranchDraft(null);
+      };
+      const pointerUp = (upEvent: PointerEvent) => {
+        cleanup();
+        setEdgeBranchDraft(null);
+        if (!moved) {
+          onTap?.();
+          return;
+        }
+        pendingPointer = reactFlow.screenToFlowPosition({
+          x: upEvent.clientX,
+          y: upEvent.clientY,
+        });
+        window.setTimeout(() => {
+          const targetId = nodeAt(pendingPointer);
+          const split = splitEdge(
+            document,
+            originEdge.id,
+            breakPoint,
+            "source",
+            { nodeTitle: "", nodeType: "fork" },
+          );
+          if (!split.insertedNodeId) return;
+          let next = split.document;
+          let selectedId = targetId;
+          if (!selectedId) {
+            const derived = createNode(
+              "未命名节点",
+              pendingPointer,
+              "task",
+            );
+            next = withNode(next, derived, pendingPointer);
+            next = addNodeToEdgeEndpointGroup(
+              next,
+              derived.id,
+              originEdge.source,
+              originEdge.target,
+            );
+            selectedId = derived.id;
+          }
+          next = connectNodes(
+            next,
+            split.insertedNodeId,
+            selectedId,
+            undefined,
+            "manual",
+          );
+          onApply(() => next, true);
+          selectionChangeRef.current(
+            { kind: "node", id: selectedId },
+            [selectedId],
+            [],
+            [],
+          );
+        }, 0);
+      };
+
+      window.addEventListener("pointermove", pointerMove);
+      window.addEventListener("pointerup", pointerUp, { once: true });
+      window.addEventListener("pointercancel", cancel, { once: true });
+      window.addEventListener("blur", cancel, { once: true });
+    },
+    [
+      document,
+      hidden,
+      onApply,
+      reactFlow,
+      routing,
+    ],
+  );
+
+  const handleEdgePointerDown = useCallback(
+    (edgeId: string, event: React.PointerEvent<SVGPathElement>) => {
+      startEdgeDerivation(edgeId, event, () => handleEdgeSelect(edgeId));
+    },
+    [handleEdgeSelect, startEdgeDerivation],
+  );
+
+  const handleTrunkPointerDown = useCallback(
+    (bundleId: string, event: React.PointerEvent<Element>) => {
+      if (event.button !== 0) return;
+      const bundle = document.bundles.find((item) => item.id === bundleId);
+      const firstEdge = bundle?.edgeIds[0];
+      if (firstEdge) {
+        startEdgeDerivation(firstEdge, event, () =>
+          onEditBranches(bundleId),
+        );
+      }
+    },
+    [document.bundles, onEditBranches, startEdgeDerivation],
+  );
+
+  const handleEdgeContextMenu = useCallback(
+    (edgeId: string, event: React.MouseEvent<SVGPathElement>) => {
+      const menuWidth = 180;
+      const menuHeight = 54;
+      setEdgeContextMenu({
+        edgeId,
+        x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+        y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+        flow: reactFlow.screenToFlowPosition({
+          x: event.clientX,
+          y: event.clientY,
+        }),
+      });
+    },
+    [reactFlow],
+  );
+
   useEffect(() => {
     const element = canvasRef.current;
     if (!element) return;
@@ -357,7 +691,7 @@ function CanvasInner({
       const target = event.target as Element;
       if (
         target.closest(
-          ".react-flow__node-workflow, .react-flow__controls, .workflow-group",
+          ".react-flow__node-workflow, .react-flow__controls, .workflow-group, .workflow-edge-hitarea, .bundle-trunk-hit-path, .bundle-label, .context-menu",
         )
       ) {
         return;
@@ -390,7 +724,140 @@ function CanvasInner({
       element.removeEventListener("pointerdown", pointerDown, true);
       element.removeEventListener("click", click, true);
     };
-  }, [document, handleEdgeSelect, reactFlow, routing]);
+  }, [document, handleEdgeSelect, onEditBranches, reactFlow, routing]);
+
+  const toFlowEdges = useCallback(
+    (
+      sourceDocument: WorkflowDocument,
+      sourceRouting: ReturnType<typeof buildWorkflowRouting>,
+      visible: Set<string>,
+    ): WorkflowFlowEdge[] =>
+      sourceDocument.edges
+        .filter(
+          (edge) => visible.has(edge.source) && visible.has(edge.target),
+        )
+        .flatMap<WorkflowFlowEdge>((edge) => {
+          const route = sourceRouting.routes[edge.id];
+          if (!route) return [];
+          const sourceNode = sourceDocument.nodes.find(
+            (node) => node.id === edge.source,
+          );
+          const targetNode = sourceDocument.nodes.find(
+            (node) => node.id === edge.target,
+          );
+          const noteEdge =
+            sourceNode?.type === "note" || targetNode?.type === "note";
+          return [
+            {
+              id: edge.id,
+              source: edge.source,
+              target: edge.target,
+              sourceHandle: "geometry-source",
+              targetHandle: "geometry-target",
+              type: "workflowEdge",
+              data: {
+                label: edge.label,
+                onSelect: handleEdgeSelect,
+                onPointerDown: handleEdgePointerDown,
+                onContextMenu: handleEdgeContextMenu,
+                path:
+                  renderQuality === "simplified"
+                    ? buildFreePreviewPath(
+                        route.sourcePoint,
+                        route.targetPoint,
+                        route.side,
+                      )
+                    : route.path,
+                labelPoint: route.labelPoint,
+                simplified: renderQuality === "simplified",
+                important: Boolean(edge.important),
+                noteEdge,
+              },
+              markerEnd: noteEdge
+                ? undefined
+                : {
+                    type: MarkerType.ArrowClosed,
+                    width: 16,
+                    height: 16,
+                  },
+              className: `workflow-edge ${
+                route.bundleId ? "is-bundle-arm" : ""
+              } ${noteEdge ? "is-note-edge" : ""}`,
+              style: { strokeWidth: 1.5 },
+            },
+          ];
+        }),
+    [
+      handleEdgeContextMenu,
+      handleEdgePointerDown,
+      handleEdgeSelect,
+      renderQuality,
+    ],
+  );
+
+  const updateLiveEdges = useCallback(
+    (
+      sourceRouting: ReturnType<typeof buildWorkflowRouting>,
+      movedNodeIds: Set<string>,
+    ) => {
+      setEdges((current) =>
+        current.map((edge) => {
+          if (
+            !movedNodeIds.has(edge.source) &&
+            !movedNodeIds.has(edge.target)
+          ) {
+            return edge;
+          }
+          const route = sourceRouting.routes[edge.id];
+          if (!route || !edge.data) return edge;
+          return {
+            ...edge,
+            data: {
+              ...edge.data,
+              path:
+                renderQuality === "simplified"
+                  ? buildFreePreviewPath(
+                      route.sourcePoint,
+                      route.targetPoint,
+                      route.side,
+                    )
+                  : route.path,
+              labelPoint: route.labelPoint,
+              simplified: renderQuality === "simplified",
+            },
+          };
+        }),
+      );
+    },
+    [renderQuality],
+  );
+
+  const updateLiveForkNodes = useCallback(
+    (sourceRouting: ReturnType<typeof buildWorkflowRouting>) => {
+      const positions = new Map<string, Point>();
+      for (const bundle of document.bundles) {
+        if (!bundle.forkNodeId || bundle.forkNodeId === bundle.sourceId) {
+          continue;
+        }
+        const branch = sourceRouting.branches[bundle.id];
+        const layout = document.layout.nodes[bundle.forkNodeId];
+        if (!branch || !layout) continue;
+        positions.set(bundle.forkNodeId, {
+          x: branch.point.x - layout.width / 2,
+          y: branch.point.y - layout.height / 2,
+        });
+      }
+      if (positions.size === 0) return;
+      setNodes((current) =>
+        current.map((node) => {
+          const position =
+            node.type === "workflow" ? positions.get(node.id) : undefined;
+          return position ? { ...node, position } : node;
+        }),
+      );
+    },
+    [document.bundles, document.layout.nodes],
+  );
 
   useEffect(() => {
     const nodeSelection = new Set(externalNodeIds);
@@ -444,72 +911,78 @@ function CanvasInner({
       if (hidden.has(node.id)) continue;
       const layout = document.layout.nodes[node.id];
       if (!layout) continue;
+      const livePosition = liveNodePositionsRef.current[node.id];
+      const absolutePosition = livePosition ?? layout;
       const parentId = parentByNode.get(node.id);
       const parentLayout = parentId
         ? document.layout.groups[parentId]
         : null;
+      const linkedForkBundle = document.bundles.find(
+        (bundle) => bundle.forkNodeId === node.id,
+      );
       flowNodes.push({
         id: node.id,
         type: "workflow",
         position: {
-          x: layout.x - (parentLayout?.x ?? 0),
-          y: layout.y - (parentLayout?.y ?? 0),
+          x: absolutePosition.x - (parentLayout?.x ?? 0),
+          y: absolutePosition.y - (parentLayout?.y ?? 0),
         },
         data: {
           node,
           showDescription: document.display.showDescriptions,
+          width: layout.width,
+          height: layout.height,
+          palette: document.display.palette,
+          outgoingCount:
+            linkedForkBundle?.edgeIds.length ??
+            document.edges.filter((edge) => edge.source === node.id).length,
+          groupTitle: parentId
+            ? document.groups.find((group) => group.id === parentId)?.title
+            : undefined,
           onBorderPointerDown: handleNodeBorderPointerDown,
         },
+        style: { width: layout.width, height: layout.height },
         selected: nodeSelection.has(node.id),
-        draggable: true,
+        draggable: node.type !== "fork",
         selectable: true,
         ...(parentId ? { parentId: groupFlowId(parentId) } : {}),
       });
     }
     setNodes(flowNodes);
-    setEdges(
-      document.edges
-        .filter((edge) => !hidden.has(edge.source) && !hidden.has(edge.target))
-        .flatMap<WorkflowFlowEdge>((edge) => {
-          const route = routing.routes[edge.id];
-          if (!route) return [];
-          return [
-            {
-              id: edge.id,
-              source: edge.source,
-              target: edge.target,
-              sourceHandle: "geometry-source",
-              targetHandle: "geometry-target",
-              type: "workflowEdge",
-              data: {
-                label: edge.label,
-                onSelect: handleEdgeSelect,
-                path: route.path,
-                labelPoint: route.labelPoint,
-              },
-              markerEnd: {
-                type: MarkerType.ArrowClosed,
-                width: 16,
-                height: 16,
-              },
-              className: "workflow-edge",
-              style: { strokeWidth: 1.5 },
-            },
-          ];
-        }),
-    );
   }, [
     graphSyncKey,
     selectedGroupKey,
     selectedNodeKey,
     hidden,
-    handleEdgeSelect,
-    handleGroupDragStart,
-    handleNodeBorderPointerDown,
     onToggleGroup,
-    parentByNode,
+  ]);
+
+  useEffect(() => {
+    if (nodeDragActiveRef.current) {
+      const positions = {
+        ...liveNodePositionsRef.current,
+        ...pendingNodePositionsRef.current,
+      };
+      if (Object.keys(positions).length > 0) {
+        const liveRouting = buildWorkflowRouting(
+          documentWithNodePositions(document, positions),
+          visibleNodeIds,
+          routingCacheRef.current,
+        );
+        updateLiveEdges(liveRouting, new Set(Object.keys(positions)));
+        updateLiveForkNodes(liveRouting);
+      }
+      return;
+    }
+    setEdges(toFlowEdges(document, routing, visibleNodeIds));
+    // `routing` changes only when graph geometry or semantics change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
     routing,
-    document.edges,
+    toFlowEdges,
+    updateLiveEdges,
+    updateLiveForkNodes,
+    visibleNodeIds,
   ]);
 
   useEffect(() => {
@@ -601,28 +1074,75 @@ function CanvasInner({
       flowNode: WorkflowFlowNode | GroupFlowNode,
     ) => {
       const position = toGlobal(flowNode);
+      if (nodeDragFrameRef.current !== null) {
+        window.cancelAnimationFrame(nodeDragFrameRef.current);
+        nodeDragFrameRef.current = null;
+      }
+      pendingNodePositionsRef.current = {};
+      liveNodePositionsRef.current = {};
+      nodeDragActiveRef.current = false;
       if (flowNode.type === "group") {
         const id = semanticGroupId(flowNode.id);
         onApply((current) => moveGroup(current, id, position), false);
+        finishRealtime();
         return;
       }
-      onApply((current) => ({
-        ...current,
-        layout: {
-          ...current.layout,
-          nodes: {
-            ...current.layout.nodes,
-            [flowNode.id]: {
-              ...current.layout.nodes[flowNode.id],
-              ...position,
-            },
-          },
-        },
-      }), false);
+      const removeFromGroup =
+        "altKey" in _event && _event.altKey;
+      onApply((current) => {
+        const moved = moveNodes(current, { [flowNode.id]: position });
+        return removeFromGroup
+          ? removeNodeFromGroup(moved, flowNode.id)
+          : moved;
+      }, false);
+      finishRealtime();
     },
     // `toGlobal` reads the current document and flow event payload.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [document, onApply],
+    [document, finishRealtime, onApply],
+  );
+
+  const handleNodeDragStart = useCallback(() => {
+    nodeDragActiveRef.current = true;
+    liveNodePositionsRef.current = {};
+    beginRealtime();
+    onCheckpoint();
+  }, [beginRealtime, onCheckpoint]);
+
+  const handleNodeDrag = useCallback(
+    (
+      _event: MouseEvent | TouchEvent,
+      flowNode: WorkflowFlowNode | GroupFlowNode,
+    ) => {
+      if (flowNode.type === "group") return;
+      pendingNodePositionsRef.current[flowNode.id] = toGlobal(flowNode);
+      if (nodeDragFrameRef.current !== null) return;
+      nodeDragFrameRef.current = window.requestAnimationFrame(() => {
+        nodeDragFrameRef.current = null;
+        const startedAt = performance.now();
+        const positions = pendingNodePositionsRef.current;
+        pendingNodePositionsRef.current = {};
+        Object.assign(liveNodePositionsRef.current, positions);
+        const liveDocument = documentWithNodePositions(document, positions);
+        const liveRouting = buildWorkflowRouting(
+          liveDocument,
+          visibleNodeIds,
+          routingCacheRef.current,
+        );
+        updateLiveEdges(liveRouting, new Set(Object.keys(positions)));
+        updateLiveForkNodes(liveRouting);
+        noteFrameCost(startedAt);
+      });
+    },
+    // `toGlobal` follows the active document being dragged.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      document,
+      noteFrameCost,
+      updateLiveEdges,
+      updateLiveForkNodes,
+      visibleNodeIds,
+    ],
   );
 
   const openContextMenu = useCallback(
@@ -633,7 +1153,7 @@ function CanvasInner({
         y: event.clientY,
       });
       const menuWidth = 198;
-      const menuHeight = 288;
+      const menuHeight = 360;
       setContextMenu({
         x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
         y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
@@ -644,9 +1164,13 @@ function CanvasInner({
   );
 
   const createNodeFromContextMenu = useCallback(
-    (type: NodeKind, title: string) => {
+    (type: NodeKind | "milestone", title: string) => {
       if (!contextMenu) return;
-      const node = createNode(title, contextMenu.flow, type);
+      const milestone = type === "milestone";
+      const node = {
+        ...createNode(title, contextMenu.flow, milestone ? "task" : type),
+        ...(milestone ? { milestone: { label: "里程碑" } } : {}),
+      };
       onApply(
         (current) => withNode(current, node, contextMenu.flow),
         true,
@@ -675,10 +1199,16 @@ function CanvasInner({
         edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
-        onNodeDragStart={onCheckpoint}
+        onNodeDragStart={handleNodeDragStart}
+        onNodeDrag={handleNodeDrag}
         onNodeDragStop={handleNodeDragStop}
         onNodeDoubleClick={(_event, node) => {
-          if (node.type === "workflow") onEditNode(node.id);
+          if (
+            node.type === "workflow" &&
+            node.data.node.type !== "fork"
+          ) {
+            onEditNode(node.id);
+          }
         }}
         onEdgeClick={(_event, edge) => {
           onSelectionChange(
@@ -721,30 +1251,44 @@ function CanvasInner({
         <Controls showInteractive={false} position="bottom-right" />
         <ViewportPortal>
           {Object.values(routing.branches).map((branch) => {
-            const source = document.nodes.find(
-              (node) => node.id === branch.sourceId,
-            );
+            if (!branch.visible) return null;
             return (
-              <button
-                key={branch.sourceId}
-                className="branch-point nodrag nopan"
-                style={{
-                  transform: `translate(${branch.point.x}px, ${branch.point.y}px)`,
-                }}
-                aria-label={`编辑分支条件：${source?.title ?? branch.sourceId}`}
-                title="编辑该节点的全部出口条件"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onEditBranches(branch.sourceId);
-                }}
-                onContextMenu={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  onEditBranches(branch.sourceId);
-                }}
-              >
-                {branch.edgeIds.length}
-              </button>
+              <div key={branch.id} className="bundle-overlay">
+                <svg className="bundle-trunk-hit-layer" aria-hidden="true">
+                  <path
+                    d={branch.trunkPath}
+                    className="bundle-trunk-hit-path"
+                    onPointerDown={(event) =>
+                      handleTrunkPointerDown(branch.bundleId, event)
+                    }
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onEditBranches(branch.bundleId);
+                    }}
+                  />
+                </svg>
+                {branch.label ? (
+                  <button
+                    className="bundle-label has-label"
+                    style={{
+                      transform: `translate(-50%, -50%) translate(${branch.labelPoint.x}px, ${branch.labelPoint.y}px)`,
+                    }}
+                    onPointerDown={(event) =>
+                      handleTrunkPointerDown(branch.bundleId, event)
+                    }
+                    onClick={() => onEditBranches(branch.bundleId)}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onEditBranches(branch.bundleId);
+                    }}
+                    title="编辑束标签和分支条件"
+                  >
+                    {branch.label}
+                  </button>
+                ) : null}
+              </div>
             );
           })}
           {connectionDraft ? (
@@ -773,6 +1317,47 @@ function CanvasInner({
                 : null}
             </>
           ) : null}
+          {edgeBranchDraft ? (
+            <>
+              <svg className="connection-preview-layer" aria-hidden="true">
+                <path
+                  className="connection-preview-path edge-branch-preview"
+                  d={edgeBranchDraft.path}
+                />
+              </svg>
+              <div
+                className="edge-break-preview"
+                style={{
+                  transform: `translate(-50%, -50%) translate(${edgeBranchDraft.breakPoint.x}px, ${edgeBranchDraft.breakPoint.y}px)`,
+                }}
+              >
+                未命名节点
+              </div>
+              {edgeBranchDraft.targetId ? (() => {
+                const target =
+                  document.layout.nodes[edgeBranchDraft.targetId];
+                return target ? (
+                  <div
+                    className="connection-target-outline"
+                    style={{
+                      transform: `translate(${target.x}px, ${target.y}px)`,
+                      width: target.width,
+                      height: target.height,
+                    }}
+                  />
+                ) : null;
+              })() : (
+                <div
+                  className="edge-insert-preview"
+                  style={{
+                    transform: `translate(-50%, -50%) translate(${edgeBranchDraft.pointer.x}px, ${edgeBranchDraft.pointer.y}px)`,
+                  }}
+                >
+                  未命名节点
+                </div>
+              )}
+            </>
+          ) : null}
         </ViewportPortal>
         {document.nodes.length === 0 && document.groups.length === 0 ? (
           <div className="canvas-empty-guide">
@@ -795,18 +1380,24 @@ function CanvasInner({
           style={{ left: contextMenu.x, top: contextMenu.y }}
           role="menu"
         >
-          <button role="menuitem" onClick={() => createNodeFromContextMenu("task", "新步骤")}>
-            新建步骤
+          <button role="menuitem" onClick={() => createNodeFromContextMenu("task", "未命名节点")}>
+            新建节点
             <kbd>Tab</kbd>
           </button>
           <button role="menuitem" onClick={() => createNodeFromContextMenu("decision", "新判断")}>
             新建判断
           </button>
-          <button role="menuitem" onClick={() => createNodeFromContextMenu("milestone", "新里程碑")}>
-            新建里程碑
+          <button role="menuitem" onClick={() => createNodeFromContextMenu("start", "开始")}>
+            新建开始
+          </button>
+          <button role="menuitem" onClick={() => createNodeFromContextMenu("fork", "")}>
+            新建分叉点
           </button>
           <button role="menuitem" onClick={() => createNodeFromContextMenu("end", "结束")}>
             新建结束
+          </button>
+          <button role="menuitem" onClick={() => createNodeFromContextMenu("milestone", "新里程碑")}>
+            新建里程碑
           </button>
           <button role="menuitem" onClick={() => createNodeFromContextMenu("note", "备注")}>
             新建备注
@@ -822,6 +1413,46 @@ function CanvasInner({
           >
             从选择创建分组
             <kbd>G</kbd>
+          </button>
+        </div>
+      ) : null}
+      {edgeContextMenu ? (
+        <div
+          className="context-menu edge-context-menu"
+          style={{ left: edgeContextMenu.x, top: edgeContextMenu.y }}
+          role="menu"
+        >
+          <button
+            role="menuitem"
+            onClick={() => {
+              const route = routing.routes[edgeContextMenu.edgeId];
+              const splitProgress = route
+                ? progressAlongRoute(edgeContextMenu.flow, route)
+                : 0.5;
+              const labelProgress = route
+                ? progressAlongRoute(route.labelPoint, route)
+                : 0.5;
+              const result = splitEdge(
+                document,
+                edgeContextMenu.edgeId,
+                edgeContextMenu.flow,
+                labelProgress <= splitProgress ? "source" : "target",
+              );
+              onApply(() => result.document, true);
+              setEdgeContextMenu(null);
+              if (result.insertedNodeId) {
+                selectionChangeRef.current(
+                  { kind: "node", id: result.insertedNodeId },
+                  [result.insertedNodeId],
+                  [],
+                  [],
+                );
+                onEditNode(result.insertedNodeId);
+              }
+            }}
+          >
+            插入节点
+            <kbd>拆分线段</kbd>
           </button>
         </div>
       ) : null}

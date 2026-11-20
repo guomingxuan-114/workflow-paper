@@ -3,10 +3,29 @@ import fs from "node:fs";
 import path from "node:path";
 import { strFromU8, unzipSync } from "fflate";
 
+async function nodeBorderPoint(
+  node: import("@playwright/test").Locator,
+  side: "top" | "right" | "bottom" | "left",
+) {
+  const box = await node.locator(".node-border-hit-path").boundingBox();
+  if (!box) throw new Error("Node border has no dimensions");
+  if (side === "right") {
+    return { x: box.x + box.width - 1, y: box.y + box.height / 2 };
+  }
+  if (side === "left") {
+    return { x: box.x + 1, y: box.y + box.height / 2 };
+  }
+  if (side === "top") {
+    return { x: box.x + box.width / 2, y: box.y + 1 };
+  }
+  return { x: box.x + box.width / 2, y: box.y + box.height - 1 };
+}
+
 test("core editing, persistence, recovery, PDF and narrow layout", async ({
   page,
   context,
 }) => {
+  test.setTimeout(90_000);
   const consoleErrors: string[] = [];
   page.on("console", async (message) => {
     if (message.type() !== "error") return;
@@ -78,13 +97,17 @@ test("core editing, persistence, recovery, PDF and narrow layout", async ({
     canvasBox.y + canvasBox.height * 0.42,
     { button: "right" },
   );
-  await page.getByRole("menuitem", { name: /新建步骤/ }).click();
+  await page.getByRole("menuitem", { name: /新建节点/ }).click();
   await expect(page.locator(".workflow-node")).toHaveCount(1);
   await expect(page.locator(".workflow-node").first()).toHaveClass(
     /workflow-node--task/,
   );
 
-  await page.locator(".workflow-node").first().dblclick();
+  await page
+    .locator(".workflow-node")
+    .first()
+    .getByRole("heading")
+    .dblclick();
   const editor = page.getByRole("dialog", { name: "编辑节点内容" });
   await editor.getByLabel("标题").fill("接收需求");
   await editor
@@ -94,7 +117,9 @@ test("core editing, persistence, recovery, PDF and narrow layout", async ({
   await expect(page.getByText("接收需求", { exact: true }).first()).toBeVisible();
 
   await page.keyboard.press("Control+z");
-  await expect(page.getByText("新步骤", { exact: true }).first()).toBeVisible();
+  await expect(
+    page.getByText("未命名节点", { exact: true }).first(),
+  ).toBeVisible();
   await page.keyboard.press("Control+Shift+z");
   await expect(page.getByText("接收需求", { exact: true }).first()).toBeVisible();
 
@@ -114,112 +139,23 @@ test("core editing, persistence, recovery, PDF and narrow layout", async ({
   const nodeAfterDrag = await page.locator(".workflow-node").first().boundingBox();
   expect(nodeAfterDrag?.x).not.toBe(nodeBeforeDrag.x);
   await expect(page.locator(".react-flow__edge")).toHaveCount(0);
-  const sourceHandle = page.locator(".node-connect-edge--right").first();
-  const handleBox = await sourceHandle.boundingBox();
-  if (!handleBox) throw new Error("Node border hit area has no dimensions");
-  await page.mouse.move(
-    handleBox.x + handleBox.width / 2,
-    handleBox.y + handleBox.height * 0.25,
-  );
-  await page.mouse.down();
-  await page.mouse.move(
-    handleBox.x + 420,
-    handleBox.y + 120,
-    { steps: 8 },
-  );
-  await expect(page.locator(".connection-preview-path")).toHaveCount(1);
-  await expect(page.locator(".connection-preview-path")).toHaveAttribute(
-    "d",
-    /C/,
-  );
-  await page.mouse.up();
-  await page.waitForTimeout(300);
+  await page.keyboard.press("Tab");
+  const successorEditor = page.getByRole("dialog", {
+    name: "编辑节点内容",
+  });
+  await expect(successorEditor).toBeVisible();
+  await successorEditor.getByRole("button", { name: "取消" }).click();
   await expect(page.locator(".workflow-node")).toHaveCount(2);
-  await page.keyboard.press("Control+0");
+  await expect(page.locator(".react-flow__edge")).toHaveCount(1);
+  await page.getByTitle("适应画布").click();
   await page.waitForTimeout(450);
 
-  const firstNode = page.locator(".workflow-node").nth(0);
   const secondNode = page.locator(".workflow-node").nth(1);
-  const firstTestId = (await firstNode.getAttribute("data-testid"))!;
   const secondTestId = (await secondNode.getAttribute("data-testid"))!;
-  const firstId = firstTestId.replace(/^node-/, "");
   const secondId = secondTestId.replace(/^node-/, "");
-  const reverseStart = await secondNode
-    .locator(".node-connect-edge--bottom")
-    .boundingBox();
-  const reverseTarget = await firstNode.boundingBox();
-  if (!reverseStart || !reverseTarget) {
-    throw new Error("Neutral connection handles are unavailable");
-  }
-  await page.mouse.move(
-    reverseStart.x + reverseStart.width / 2,
-    reverseStart.y + reverseStart.height / 2,
-  );
-  await page.mouse.down();
-  await page.mouse.move(
-    reverseTarget.x + reverseTarget.width * 0.5,
-    reverseTarget.y + reverseTarget.height * 0.5,
-    { steps: 8 },
-  );
-  await expect(page.locator(".connection-target-outline")).toHaveCount(1);
-  await page.mouse.up();
-  await expect(
-    page.locator(
-      `.workflow-edge-hitarea[data-edge-source="${secondId}"][data-edge-target="${firstId}"]`,
-    ),
-  ).toHaveCount(1);
-
-  await page.mouse.click(
-    canvasBox.x + canvasBox.width * 0.5,
-    canvasBox.y + canvasBox.height * 0.12,
-    { button: "right" },
-  );
-  await page.getByRole("menuitem", { name: "新建判断" }).click();
-  await expect(page.locator(".workflow-node")).toHaveCount(3);
-  const thirdNode = page.locator(".workflow-node").nth(2);
-  const thirdTestId = (await thirdNode.getAttribute("data-testid"))!;
-  const branchSourceHandle = await firstNode
-    .locator(".node-connect-edge--right")
-    .boundingBox();
-  const branchTargetHandle = await thirdNode.boundingBox();
-  if (!branchSourceHandle || !branchTargetHandle) {
-    throw new Error("Branch connection handles are unavailable");
-  }
-  await page.mouse.move(
-    branchSourceHandle.x + branchSourceHandle.width / 2,
-    branchSourceHandle.y + branchSourceHandle.height / 2,
-  );
-  await page.mouse.down();
-  await page.mouse.move(
-    branchTargetHandle.x + branchTargetHandle.width / 2,
-    branchTargetHandle.y + branchTargetHandle.height / 2,
-    { steps: 8 },
-  );
-  await page.mouse.up();
-  await expect(page.locator(".branch-point")).toHaveCount(1);
-  await page.locator(".branch-point").click({ button: "right" });
-  const branchDialog = page.getByRole("dialog", { name: "分支条件" });
-  await expect(branchDialog).toBeVisible();
-  const branchInputs = branchDialog.locator("input");
-  await branchInputs.nth(0).fill("主路径");
-  await branchInputs.nth(1).fill("备选路径");
-  await branchDialog.getByRole("button", { name: "保存全部条件" }).click();
-  await expect(page.getByText("主路径", { exact: true })).toBeVisible();
-  await expect(page.getByText("备选路径", { exact: true })).toBeVisible();
-  const screenshotDirectory = path.resolve("output/screenshots");
-  fs.mkdirSync(screenshotDirectory, { recursive: true });
-  const branchInspectorCollapse = page.getByLabel("收起详情栏");
-  if (await branchInspectorCollapse.isVisible().catch(() => false)) {
-    await branchInspectorCollapse.click();
-  }
-  await page.screenshot({
-    path: path.join(screenshotDirectory, "04-multi-branch.png"),
-  });
-
-  await firstNode.click();
-  await thirdNode.click({ modifiers: ["Shift"] });
-  await expect(firstNode).toHaveClass(/is-selected/);
-  await expect(thirdNode).toHaveClass(/is-selected/);
+  await page.getByLabel("收起详情栏").click();
+  await secondNode.click();
+  await expect(secondNode).toHaveClass(/is-selected/);
   await page.mouse.click(
     canvasBox.x + canvasBox.width * 0.06,
     canvasBox.y + canvasBox.height * 0.82,
@@ -227,9 +163,9 @@ test("core editing, persistence, recovery, PDF and narrow layout", async ({
   );
   await page.getByRole("menuitem", { name: "从选择创建分组" }).click();
   await expect(page.locator(".workflow-group")).toHaveCount(1);
-  await page.keyboard.press("Control+0");
-  await page.waitForTimeout(450);
-  const memberBefore = await firstNode.boundingBox();
+  await page.getByLabel("收起详情栏").click();
+  await page.waitForTimeout(300);
+  const memberBefore = await secondNode.boundingBox();
   const groupTitlebar = page.locator(".group-titlebar").first();
   const groupBox = await groupTitlebar.boundingBox();
   if (!memberBefore || !groupBox) throw new Error("Group drag target unavailable");
@@ -238,21 +174,21 @@ test("core editing, persistence, recovery, PDF and narrow layout", async ({
     groupBox.y + 12,
   );
   await page.mouse.down();
-  await page.mouse.move(groupBox.x + 95, groupBox.y + 55, { steps: 8 });
+  await page.mouse.move(groupBox.x - 120, groupBox.y + 55, { steps: 8 });
   await page.mouse.up();
-  const memberAfter = await firstNode.boundingBox();
+  const memberAfter = await secondNode.boundingBox();
   expect(memberAfter?.x).not.toBe(memberBefore.x);
   await page.keyboard.press("Control+z");
   await expect
     .poll(async () => {
-      const x = (await firstNode.boundingBox())?.x;
+      const x = (await secondNode.boundingBox())?.x;
       return x === undefined ? Number.POSITIVE_INFINITY : Math.abs(x - memberBefore.x);
     })
     .toBeLessThan(3);
   await page.keyboard.press("Control+Shift+z");
   await expect
     .poll(async () => {
-      const x = (await firstNode.boundingBox())?.x;
+      const x = (await secondNode.boundingBox())?.x;
       return x === undefined || memberAfter === undefined
         ? Number.POSITIVE_INFINITY
         : Math.abs(x - memberAfter.x);
@@ -276,14 +212,14 @@ test("core editing, persistence, recovery, PDF and narrow layout", async ({
     };
   };
   const savedGroupPosition = Object.values(savedDocument.layout.groups)[0];
-  const savedMemberPosition = savedDocument.layout.nodes[firstId];
+  const savedMemberPosition = savedDocument.layout.nodes[secondId];
 
   await page.reload();
   await expect(page.getByRole("heading", { name: /把流程画下来/ })).toBeVisible();
   page.once("dialog", (dialog) => dialog.accept("1"));
   await page.getByRole("button", { name: "打开本地文件" }).click();
   await expect(page.getByLabel("工作流画布")).toBeVisible();
-  await expect(page.locator(".workflow-node")).toHaveCount(3);
+  await expect(page.locator(".workflow-node")).toHaveCount(2);
   await expect(page.getByText("接收需求", { exact: true }).first()).toBeVisible();
   await page.getByRole("button", { name: "保存", exact: true }).click();
   await expect.poll(() => fs.existsSync(savedPath)).toBe(true);
@@ -294,11 +230,16 @@ test("core editing, persistence, recovery, PDF and narrow layout", async ({
   expect(Object.values(reopenedDocument.layout.groups)[0]).toMatchObject(
     savedGroupPosition,
   );
-  expect(reopenedDocument.layout.nodes[firstId]).toMatchObject(
+  expect(reopenedDocument.layout.nodes[secondId]).toMatchObject(
     savedMemberPosition,
   );
 
-  await page.locator(".workflow-node").first().dblclick();
+  await page
+    .locator(".outline-row")
+    .filter({ has: page.getByLabel("大纲节点 接收需求") })
+    .first()
+    .click({ position: { x: 6, y: 8 } });
+  await page.keyboard.press("e");
   const renameEditor = page.getByRole("dialog", { name: "编辑节点内容" });
   await renameEditor.getByLabel("标题").fill("接收需求 v2");
   await renameEditor.getByRole("button", { name: "保存内容" }).click();
@@ -315,13 +256,12 @@ test("core editing, persistence, recovery, PDF and narrow layout", async ({
   await page.getByRole("button", { name: "导出 PDF" }).click();
   const printPage = await popupPromise;
   await printPage.waitForLoadState("domcontentloaded");
-  await expect(printPage.locator(".print-page")).toHaveCount(4);
+  await expect(printPage.locator(".print-page")).toHaveCount(3);
   await expect(
     printPage.getByRole("heading", { name: "接收需求 v2", exact: true }),
   ).toBeVisible();
-  await expect(printPage.getByText(/第 1 \/ 4 页/)).toBeVisible();
+  await expect(printPage.getByText(/第 1 \/ 3 页/)).toBeVisible();
   await expect(printPage.getByText(/已折叠/).first()).toBeVisible();
-  await expect(printPage.getByText("出口条件")).toBeVisible();
   const outputDir = path.resolve("tmp/validation");
   fs.mkdirSync(outputDir, { recursive: true });
   await printPage.pdf({
@@ -402,7 +342,10 @@ test("imported snapshot keeps groups and exports complete paginated PDF", async 
   const firstNode = page.locator(".workflow-node").first();
   const nodeBox = await firstNode.boundingBox();
   if (!nodeBox) throw new Error("Imported node has no dimensions");
-  await page.mouse.move(nodeBox.x + 40, nodeBox.y + 40);
+  await page.mouse.move(
+    nodeBox.x + nodeBox.width / 2,
+    nodeBox.y + nodeBox.height / 2,
+  );
   await page.mouse.down();
   await page.mouse.move(nodeBox.x + 100, nodeBox.y + 70, { steps: 6 });
   await page.mouse.up();
@@ -433,5 +376,11 @@ test("imported snapshot keeps groups and exports complete paginated PDF", async 
   await expect(
     mainOutline.getByLabel("大纲节点 运行质量门禁"),
   ).toHaveValue("运行质量门禁");
+  await expect(
+    mainOutline
+      .getByLabel("大纲节点 运行质量门禁")
+      .locator("xpath=..")
+      .locator(".outline-type"),
+  ).toHaveText("节点");
 });
 

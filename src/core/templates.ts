@@ -1,5 +1,6 @@
-import { createDocument, createNode, NODE_HEIGHT, NODE_WIDTH, withNode } from "./document";
+import { createDocument, createNode } from "./document";
 import { importSnapshot } from "./import";
+import { nodeMetrics } from "./nodeShapes";
 import type { WorkflowDocument } from "./types";
 
 export const sampleImport: unknown = {
@@ -109,7 +110,12 @@ export function createTemplateDocument(kind: "approval" | "incident"): WorkflowD
         nodes: Object.fromEntries(
           nodes.map((node, index) => [
             node.id,
-            { x: specs[index][1], y: 110, width: NODE_WIDTH, height: NODE_HEIGHT },
+            {
+              x: specs[index][1],
+              y: 110,
+              width: nodeMetrics(node).width,
+              height: nodeMetrics(node).height,
+            },
           ]),
         ),
       },
@@ -145,7 +151,12 @@ export function createTemplateDocument(kind: "approval" | "incident"): WorkflowD
         ...document.layout,
         nodes: {
           ...document.layout.nodes,
-          [node.id]: { x, y, width: NODE_WIDTH, height: NODE_HEIGHT },
+          [node.id]: {
+            x,
+            y,
+            width: nodeMetrics(node).width,
+            height: nodeMetrics(node).height,
+          },
         },
       },
     };

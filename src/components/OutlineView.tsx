@@ -1,11 +1,18 @@
-import { ChevronDown, ChevronRight, GitBranch, Layers } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Flag,
+  GitBranch,
+  Layers,
+  Star,
+} from "lucide-react";
 import type { WorkflowDocument } from "../core/types";
 
 interface OutlineViewProps {
   document: WorkflowDocument;
   selectedNodeIds: string[];
   selectedGroupIds: string[];
-  onSelect: (kind: "node" | "group", id: string) => void;
+  onSelect: (kind: "node" | "group" | "edge", id: string) => void;
   onToggleGroup: (groupId: string) => void;
   onRenameNode: (nodeId: string, title: string) => void;
 }
@@ -23,6 +30,12 @@ export function OutlineView({
   );
   const roots = document.groups.filter((group) => !group.parentId);
   const looseNodes = document.nodes.filter((node) => !grouped.has(node.id));
+  const importantNodes = document.nodes.filter((node) => node.important);
+  const importantEdges = document.edges.filter((edge) => edge.important);
+  const importantGroups = document.groups.filter((group) => group.important);
+  const milestones = document.nodes.filter((node) => node.milestone);
+  const nodeTitle = (id: string) =>
+    document.nodes.find((node) => node.id === id)?.title ?? id;
 
   const renderNodes = (nodeIds: string[], depth: number) =>
     document.nodes
@@ -49,7 +62,13 @@ export function OutlineView({
             onClick={(event) => event.stopPropagation()}
             onChange={(event) => onRenameNode(node.id, event.target.value)}
           />
-          <span className="outline-type">{node.type}</span>
+          <span className="outline-type">
+            {node.type === "task"
+              ? "节点"
+              : node.type === "fork"
+                ? "分叉点"
+                : node.type}
+          </span>
         </div>
       ));
 
@@ -102,6 +121,67 @@ export function OutlineView({
           大纲与画布共享节点 ID、标题和分组。点击任一行会同步选中画布，标题修改会立即写回文档。
         </p>
       </div>
+      <section className="outline-category" data-testid="important-view">
+        <h3>
+          <Star size={13} fill="currentColor" />
+          重要的
+          <span>
+            {importantNodes.length +
+              importantEdges.length +
+              importantGroups.length}
+          </span>
+        </h3>
+        {importantNodes.map((node) => (
+          <button
+            key={`important-node-${node.id}`}
+            onClick={() => onSelect("node", node.id)}
+          >
+            <GitBranch size={12} />
+            {node.title}
+          </button>
+        ))}
+        {importantEdges.map((edge) => (
+          <button
+            key={`important-edge-${edge.id}`}
+            onClick={() => onSelect("edge", edge.id)}
+          >
+            <GitBranch size={12} />
+            {nodeTitle(edge.source)} → {nodeTitle(edge.target)}
+          </button>
+        ))}
+        {importantGroups.map((group) => (
+          <button
+            key={`important-group-${group.id}`}
+            onClick={() => onSelect("group", group.id)}
+          >
+            <Layers size={12} />
+            {group.title}
+          </button>
+        ))}
+        {importantNodes.length +
+          importantEdges.length +
+          importantGroups.length ===
+        0 ? (
+          <p>暂无重要标记</p>
+        ) : null}
+      </section>
+      <section className="outline-category" data-testid="milestone-view">
+        <h3>
+          <Flag size={13} />
+          里程碑
+          <span>{milestones.length}</span>
+        </h3>
+        {milestones.map((node) => (
+          <button
+            key={`milestone-${node.id}`}
+            onClick={() => onSelect("node", node.id)}
+          >
+            <Flag size={12} />
+            {node.milestone?.label || node.title}
+          </button>
+        ))}
+        {milestones.length === 0 ? <p>暂无里程碑</p> : null}
+      </section>
       {roots.map((group) => renderGroup(group.id))}
       {looseNodes.length > 0 ? (
         <section className="outline-group">

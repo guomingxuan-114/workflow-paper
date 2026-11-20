@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -27,12 +28,15 @@ namespace WorkflowLauncher
 
             try
             {
-                if (!IsServiceReady())
+                var expectedVersion = ReadExpectedVersion(baseDirectory);
+                if (!IsCurrentService(expectedVersion))
                 {
+                    StopStaleService();
                     StartService(baseDirectory);
                 }
 
-                Process.Start(new ProcessStartInfo(AppUrl)
+                Process.Start(new ProcessStartInfo(
+                    AppUrl + "?build=" + DateTime.UtcNow.Ticks)
                 {
                     UseShellExecute = true
                 });
@@ -74,6 +78,144 @@ namespace WorkflowLauncher
                     MessageBoxIcon.Information);
                 return 0;
             }
+        }
+
+        private static string ReadExpectedVersion(string baseDirectory)
+        {
+            var configPath = Path.Combine(baseDirectory, "product.config.json");
+            var content = File.ReadAllText(configPath);
+            var match = Regex.Match(
+                content,
+                "\"appVersion\"\\s*:\\s*\"([^\"]+)\"");
+            if (!match.Success)
+            {
+                throw new InvalidDataException(
+                    "Missing appVersion in product.config.json");
+            }
+            return match.Groups[1].Value;
+        }
+
+        private static bool IsCurrentService(string expectedVersion)
+        {
+            var actualVersion = GetServiceVersion();
+            return actualVersion != null &&
+                string.Equals(
+                    actualVersion,
+                    expectedVersion,
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string GetServiceVersion()
+        {
+            try
+            {
+                using (var client = new WebClient())
+                {
+                    var body = client.DownloadString(AppUrl + "api/status");
+                    var match = Regex.Match(
+                        body,
+                        "\"appVersion\"\\s*:\\s*\"([^\"]+)\"");
+                    return match.Success ? match.Groups[1].Value : null;
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static void StopStaleService()
+        {
+            if (!IsServiceReady()) return;
+            try
+            {
+                using (var client = new WebClient())
+                {
+                    client.Headers[HttpRequestHeader.ContentLength] = "0";
+                    client.UploadString(
+                        AppUrl + "api/shutdown",
+                        "POST",
+                        string.Empty);
+                }
+            }
+            catch
+            {
+                // Continue waiting for the stale process to exit.
+            }
+
+            for (var attempt = 0; attempt < 40; attempt++)
+            {
+                if (!IsServiceReady()) return;
+                Thread.Sleep(250);
+            }
+
+            var listenerPid = FindListenerPid(4173);
+            if (listenerPid == null)
+            {
+                return;
+            }
+            try
+            {
+                using (var process = Process.GetProcessById(listenerPid.Value))
+                {
+                    process.Kill();
+                    process.WaitForExit(3000);
+                }
+            }
+            catch
+            {
+                // The process may have exited between checks.
+            }
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                if (!IsServiceReady()) return;
+                Thread.Sleep(200);
+            }
+            throw new TimeoutException(
+                "The previous local service did not stop.");
+        }
+
+        private static int? FindListenerPid(int port)
+        {
+            try
+            {
+                using (var process = Process.Start(new ProcessStartInfo("netstat")
+                {
+                    Arguments = "-ano -p tcp",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                }))
+                {
+                    if (process == null) return null;
+                    var output = process.StandardOutput.ReadToEnd();
+                    process.WaitForExit(2000);
+                    foreach (var line in output.Split(
+                        new[] { '\r', '\n' },
+                        StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        if (!line.Contains("LISTENING") ||
+                            !line.Contains(":" + port + " "))
+                        {
+                            continue;
+                        }
+                        var parts = Regex.Split(
+                            line.Trim(),
+                            "\\s+");
+                        int value;
+                        if (parts.Length > 0 &&
+                            int.TryParse(parts[parts.Length - 1], out value))
+                        {
+                            return value;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Fall through to a normal start attempt.
+            }
+            return null;
         }
 
         private static void StartService(string baseDirectory)

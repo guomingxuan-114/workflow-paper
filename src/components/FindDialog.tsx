@@ -50,9 +50,22 @@ export function FindDialog({ document, onSelect, onClose }: FindDialogProps) {
           >
             <span>
               <strong>{node.title}</strong>
-              <small>{node.description || node.type}</small>
+              <small>
+                {node.description ||
+                  (node.type === "task"
+                    ? "节点"
+                    : node.type === "fork"
+                      ? "分叉点"
+                      : node.type)}
+              </small>
             </span>
-            <kbd>{node.type}</kbd>
+            <kbd>
+              {node.type === "task"
+                ? "节点"
+                : node.type === "fork"
+                  ? "分叉点"
+                  : node.type}
+            </kbd>
           </button>
         ))}
         {matches.length === 0 ? <p className="find-empty">没有匹配节点。</p> : null}

@@ -1,5 +1,5 @@
 import type { Node, NodeProps } from "@xyflow/react";
-import { ChevronDown, ChevronRight, Folder } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder, Star } from "lucide-react";
 import type { WorkflowGroup } from "../core/types";
 
 export interface GroupNodeData extends Record<string, unknown> {
@@ -21,7 +21,9 @@ export function GroupNodeView({ data, selected }: NodeProps<GroupFlowNode>) {
     <section
       className={`workflow-group workflow-group--${group.color ?? "sage"} ${
         selected ? "is-selected" : ""
-      } ${group.collapsed ? "is-collapsed" : ""}`}
+      } ${group.collapsed ? "is-collapsed" : ""} ${
+        group.important ? "is-important" : ""
+      }`}
       data-testid={`group-${group.id}`}
     >
       <div
@@ -45,12 +47,13 @@ export function GroupNodeView({ data, selected }: NodeProps<GroupFlowNode>) {
           {group.collapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
         </button>
         <Folder size={14} />
+        {group.important ? <Star size={11} fill="currentColor" /> : null}
         <strong>{group.title}</strong>
         <span>{memberCount} 个节点</span>
       </div>
       {group.collapsed ? (
         <div className="group-collapsed-summary">
-          {memberCount} 个步骤已折叠
+          {memberCount} 个节点已折叠
         </div>
       ) : null}
     </section>

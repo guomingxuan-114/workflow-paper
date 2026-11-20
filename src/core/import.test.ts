@@ -25,6 +25,10 @@ describe("program snapshot import v1", () => {
       kind: "import",
       originalId: "commit",
     });
+    expect(first.nodes[4]).toMatchObject({
+      type: "task",
+      milestone: { label: "里程碑" },
+    });
     expect(first.layout.nodes[first.nodes[0].id]).toMatchObject({
       x: expect.any(Number),
       y: expect.any(Number),

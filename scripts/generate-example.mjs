@@ -20,22 +20,27 @@ const nodeId = (id) => `import:${safe(snapshot.source.id)}:${safe(id)}`;
 const groupId = (id) => `import:${safe(snapshot.source.id)}:group:${safe(id)}`;
 const importedAt = "2026-11-17T08:31:00.000Z";
 
-const nodes = snapshot.nodes.map((node) => ({
-  id: nodeId(node.id),
-  title: node.title,
-  description: node.description ?? "",
-  type: node.type ?? "task",
-  tags: node.tags ?? [],
-  origin: {
-    kind: "import",
-    system: snapshot.source.name,
-    version: snapshot.version.label,
-    ...(snapshot.version.commit ? { commit: snapshot.version.commit } : {}),
-    originalId: node.id,
-    importedAt,
-  },
-  ...(node.source ? { source: node.source } : {}),
-}));
+const nodes = snapshot.nodes.map((node) => {
+  const legacyMilestone = node.type === "milestone";
+  return {
+    id: nodeId(node.id),
+    title: node.title,
+    description: node.description ?? "",
+    type: legacyMilestone ? "task" : (node.type ?? "task"),
+    tags: node.tags ?? [],
+    origin: {
+      kind: "import",
+      system: snapshot.source.name,
+      version: snapshot.version.label,
+      ...(snapshot.version.commit ? { commit: snapshot.version.commit } : {}),
+      originalId: node.id,
+      importedAt,
+    },
+    important: false,
+    ...(legacyMilestone ? { milestone: { label: "里程碑" } } : {}),
+    ...(node.source ? { source: node.source } : {}),
+  };
+});
 
 const grouped = new Map();
 for (const node of snapshot.nodes) {
@@ -50,6 +55,7 @@ const groups = (snapshot.groups ?? []).map((group) => ({
   title: group.title,
   collapsed: group.collapsed ?? false,
   color: group.color ?? "sage",
+  important: false,
   nodeIds: grouped.get(group.id) ?? [],
   ...(group.parentId ? { parentId: groupId(group.parentId) } : {}),
 }));
@@ -74,15 +80,24 @@ for (let cursor = 0; cursor < queue.length; cursor += 1) {
 }
 const columns = new Map();
 const nodeLayout = {};
+const nodeSize = (node) => {
+  if (node.type === "decision") return { width: 252, height: 136 };
+  if (node.type === "start" || node.type === "end") {
+    return { width: 268, height: 132 };
+  }
+  if (node.type === "note") return { width: 224, height: 126 };
+  if (node.milestone || node.important) return { width: 236, height: 116 };
+  return { width: 224, height: 106 };
+};
 for (const node of snapshot.nodes) {
   const column = level.get(node.id) ?? 0;
   const row = columns.get(column) ?? 0;
   columns.set(column, row + 1);
+  const semanticNode = nodes.find((item) => item.id === nodeId(node.id));
   nodeLayout[nodeId(node.id)] = {
     x: 140 + column * 310,
     y: 160 + row * 170,
-    width: 224,
-    height: 106,
+    ...nodeSize(semanticNode),
   };
 }
 
@@ -103,7 +118,7 @@ for (const group of groups) {
 
 const createdAt = "2026-11-17T08:31:00.000Z";
 const document = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   id: "doc-example-release-pipeline",
   metadata: {
     title: "发布程序 · 版本快照",
@@ -126,8 +141,10 @@ const document = {
     target: nodeId(edge.target),
     ...(edge.label ? { label: edge.label } : {}),
     origin: "import",
+    important: false,
   })),
   groups,
+  bundles: [],
   layout: {
     nodes: nodeLayout,
     groups: groupLayout,
@@ -136,6 +153,7 @@ const document = {
   display: {
     showDescriptions: true,
     theme: "paper",
+    palette: "default",
   },
 };
 
@@ -158,7 +176,7 @@ function checksumText(value) {
 const manifest = {
   format: "local-workflow",
   containerVersion: 1,
-  documentSchemaVersion: 1,
+  documentSchemaVersion: 2,
   product: productConfig.name,
   appVersion: productConfig.appVersion,
   createdAt,

@@ -1,6 +1,8 @@
 import { PRODUCT } from "../config/product";
 import { getHiddenNodeIds } from "../core/document";
 import { buildWorkflowRouting, type EdgeRoute } from "../core/edgeRouting";
+import { nodeBoundaryPath, nodeMetrics } from "../core/nodeShapes";
+import { mixHex, PALETTES } from "../core/palettes";
 import type {
   WorkflowDocument,
   WorkflowEdge,
@@ -104,6 +106,7 @@ function wrapSvgText(value: string, max = 16): string[] {
 }
 
 function renderGraph(document: WorkflowDocument, compact = false): string {
+  const palette = PALETTES[document.display.palette] ?? PALETTES.default;
   const hidden = getHiddenNodeIds(document);
   const visibleNodeIds = new Set(
     document.nodes
@@ -122,7 +125,9 @@ function renderGraph(document: WorkflowDocument, compact = false): string {
       const height = group.collapsed
         ? 76
         : layout.height;
-      return `<g class="pdf-group ${group.collapsed ? "is-collapsed" : ""}"><rect x="${layout.x}" y="${layout.y}" width="${width}" height="${height}" rx="18"/></g>`;
+      return `<g class="pdf-group ${group.collapsed ? "is-collapsed" : ""} ${
+        group.important ? "is-important" : ""
+      }"><rect x="${layout.x}" y="${layout.y}" width="${width}" height="${height}" rx="34"/></g>`;
     })
     .join("");
   const groupLabels = document.groups
@@ -133,46 +138,136 @@ function renderGraph(document: WorkflowDocument, compact = false): string {
     })
     .join("");
   const edgeById = new Map(document.edges.map((edge) => [edge.id, edge]));
-  const routesBySource = new Map<string, EdgeRoute[]>();
+  const routeGroups = new Map<string, EdgeRoute[]>();
   for (const route of Object.values(routing.routes)) {
-    const routeKey = `${route.sourceId}:${route.side}`;
-    const routes = routesBySource.get(routeKey) ?? [];
+    const routeKey = route.bundleId ? `bundle:${route.bundleId}` : `edge:${route.edgeId}`;
+    const routes = routeGroups.get(routeKey) ?? [];
     routes.push(route);
-    routesBySource.set(routeKey, routes);
+    routeGroups.set(routeKey, routes);
   }
-  const edges = [...routesBySource.values()]
+  const edges = [...routeGroups.values()]
     .map((routes) => {
-      const trunk = routes[0]?.trunkPath ?? "";
+      const trunk =
+        routes.length > 1 ? routes[0]?.trunkPath ?? "" : "";
+      const branch = routes[0]?.bundleId
+        ? routing.branches[routes[0].bundleId]
+        : undefined;
       const arms = routes
         .map((route) => {
           const edge = edgeById.get(route.edgeId);
           const label = edge?.label ?? "";
-          return `<g class="pdf-edge"><path d="${route.armPath}" marker-end="url(#arrow)"/>${
+          const noteEdge =
+            document.nodes.find((node) => node.id === route.sourceId)?.type ===
+              "note" ||
+            document.nodes.find((node) => node.id === route.targetId)?.type ===
+              "note";
+          const pathData =
+            routes.length > 1
+              ? `M ${route.forkPoint.x} ${route.forkPoint.y} ${route.armPath}`
+              : route.path;
+          return `<g class="pdf-edge ${
+            route.bundleId ? "is-bundle-arm" : ""
+          } ${route.important ? "is-important" : ""} ${
+            noteEdge ? "is-note-edge" : ""
+          }"><path d="${pathData}" ${
+            noteEdge
+              ? ""
+              : route.important
+                ? 'marker-end="url(#arrow-important)"'
+                : route.bundleId
+                  ? 'marker-end="url(#arrow-branch)"'
+                  : 'marker-end="url(#arrow)"'
+          }/>${
             label
               ? `<text x="${route.labelPoint.x}" y="${route.labelPoint.y}" text-anchor="middle">${escapeHtml(label)}</text>`
               : ""
           }</g>`;
         })
         .join("");
-      return `<path class="pdf-edge-trunk" d="${trunk}" marker-end="none"/>${arms}`;
+      return `${trunk ? `<path class="pdf-edge-trunk" d="${trunk}" marker-end="none"/>` : ""}${
+        branch?.visible && branch.label
+          ? `<g class="pdf-bundle-label"><rect x="${branch.labelPoint.x - 20}" y="${branch.labelPoint.y - 9}" width="40" height="18" rx="9"/><text x="${branch.labelPoint.x}" y="${branch.labelPoint.y + 3}" text-anchor="middle">${escapeHtml(branch.label)}</text></g>`
+          : ""
+      }${arms}`;
     })
     .join("");
+  const outgoingCounts = new Map<string, number>();
+  for (const edge of document.edges) {
+    outgoingCounts.set(edge.source, (outgoingCounts.get(edge.source) ?? 0) + 1);
+  }
   const nodes = document.nodes
     .filter((node) => visibleNodeIds.has(node.id))
     .map((node) => {
       const layout = document.layout.nodes[node.id];
       if (!layout) return "";
-      const titleLines = wrapSvgText(node.title, compact ? 13 : 16);
-      return `<g class="pdf-node pdf-node--${node.type}"><rect x="${layout.x}" y="${layout.y}" width="${layout.width}" height="${layout.height}" rx="12"/>${titleLines
+      const metrics = nodeMetrics(node);
+      const baseFill =
+        node.type === "start"
+          ? palette.colors.start
+          : node.type === "end"
+            ? palette.colors.end
+            : node.type === "decision"
+              ? palette.colors.decision
+              : node.type === "fork"
+                ? palette.colors.bundle
+              : node.type === "note"
+                ? palette.colors.note
+                : palette.colors.node;
+      const emphasisFill = node.important
+        ? mixHex(baseFill, palette.colors.important, 0.2)
+        : node.milestone
+          ? mixHex(baseFill, palette.colors.milestone, 0.16)
+          : baseFill;
+      const outgoingCount = outgoingCounts.get(node.id) ?? 0;
+      const displayTitle =
+        node.type === "fork" && !node.title.trim()
+          ? String(outgoingCount)
+          : node.title;
+      const titleLines = wrapSvgText(displayTitle, compact ? 13 : 16);
+      const boundary = nodeBoundaryPath(node, layout.width, layout.height);
+      const textCenterX = layout.x + layout.width / 2;
+      const titleCenterX =
+        node.type === "fork" && node.title.trim()
+          ? textCenterX - 9
+          : textCenterX;
+      const textTop =
+        layout.y +
+        layout.height / 2 -
+        ((titleLines.length - 1) * 18) / 2 +
+        5;
+      const centered = metrics.shape === "ellipse" || metrics.shape === "capsule";
+      const forkCount =
+        node.type === "fork" && node.title.trim()
+          ? `<g class="pdf-fork-count"><circle cx="${layout.x + layout.width - 32}" cy="${layout.y + layout.height / 2}" r="9"/><text x="${layout.x + layout.width - 32}" y="${layout.y + layout.height / 2 + 3}" text-anchor="middle">${outgoingCount}</text></g>`
+          : "";
+      return `<g class="pdf-node pdf-node--${node.type} pdf-node--shape-${metrics.shape} ${
+        node.important ? "is-important" : ""
+      } ${node.milestone ? "is-milestone" : ""}"><path d="${boundary}" style="fill:${emphasisFill}" transform="translate(${layout.x} ${layout.y})"/>${titleLines
         .map(
           (line, index) =>
-            `<text class="pdf-node-title" x="${layout.x + 16}" y="${layout.y + 30 + index * 20}">${escapeHtml(line)}</text>`,
+            `<text class="pdf-node-title" x="${
+              centered ? titleCenterX : layout.x + metrics.textInsetX
+            }" y="${textTop + index * 18}" ${
+              centered ? 'text-anchor="middle"' : ""
+            }>${escapeHtml(line)}</text>`,
         )
-        .join("")}<text class="pdf-node-type" x="${layout.x + layout.width - 16}" y="${layout.y + layout.height - 14}" text-anchor="end">${escapeHtml(node.type)}</text></g>`;
+        .join("")}${
+          node.milestone
+            ? `<text class="pdf-node-milestone" x="${
+                centered ? textCenterX : layout.x + metrics.textInsetX
+              }" y="${layout.y + layout.height - 14}" ${
+                centered ? 'text-anchor="middle"' : ""
+              }>◆ ${escapeHtml(node.milestone.label || "里程碑")}</text>`
+            : ""
+        }${forkCount}</g>`;
     })
     .join("");
   return `<svg class="pdf-graph" viewBox="${scale.viewBox}" role="img" aria-label="工作流总览图">
-    <defs><marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#8b8173"/></marker></defs>
+    <defs>
+      <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="${palette.colors.edge}"/></marker>
+      <marker id="arrow-branch" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="${palette.colors.branch}"/></marker>
+      <marker id="arrow-important" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="${palette.colors.important}"/></marker>
+    </defs>
     ${groupBoxes}${edges}${nodes}${groupLabels}
   </svg>`;
 }
@@ -181,8 +276,9 @@ function renderLegend(): string {
   return `<div class="pdf-legend">
     <span><i class="legend-line"></i> 有向关系</span>
     <span><i class="legend-box legend-start"></i> 开始 / 结束</span>
-    <span><i class="legend-box legend-task"></i> 步骤</span>
+    <span><i class="legend-box legend-task"></i> 节点</span>
     <span><i class="legend-box legend-decision"></i> 判断</span>
+    <span><i class="legend-box legend-fork"></i> 分叉点</span>
     <span><i class="legend-box legend-import"></i> 程序导入</span>
   </div>`;
 }
@@ -245,13 +341,28 @@ function paginateNodes(
 }
 
 function nodeDetail(node: WorkflowNode): string {
+  const displayType =
+    node.type === "task"
+      ? "节点"
+      : node.type === "fork"
+        ? "分叉点"
+        : node.type;
   return `<article class="pdf-node-detail">
     <div class="pdf-detail-head">
-      <span class="pdf-kind">${escapeHtml(node.type)}</span>
+      <span class="pdf-kind">${escapeHtml(displayType)}</span>
       <span>${node.origin.kind === "import" ? `导入自 ${escapeHtml(node.origin.system)} · ${escapeHtml(node.origin.version)}` : "手工节点"}</span>
     </div>
     <h3>${escapeHtml(node.title)}</h3>
     <p>${escapeHtml(node.description || "（暂无描述）")}</p>
+    ${
+      node.milestone || node.important
+        ? `<div class="pdf-detail-flags">${
+            node.milestone
+              ? `<span>◆ ${escapeHtml(node.milestone.label || "里程碑")}</span>`
+              : ""
+          }${node.important ? "<span>★ 重要</span>" : ""}</div>`
+        : ""
+    }
     ${node.tags.length > 0 ? `<div class="pdf-tags">${node.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>` : ""}
     ${node.source?.file ? `<div class="pdf-source">${escapeHtml(node.source.file)}${node.source.symbol ? ` · ${escapeHtml(node.source.symbol)}` : ""}</div>` : ""}
   </article>`;
@@ -274,7 +385,7 @@ function renderDetailPage(
     ${pageHeader(document, detailLabel(group))}
     <div class="pdf-detail-title">
       <div class="pdf-kicker">DETAIL ${part} / ${parts}</div>
-      <h2>${escapeHtml(group?.title ?? "流程步骤说明")}${
+      <h2>${escapeHtml(group?.title ?? "流程节点说明")}${
         group?.collapsed ? " · 已折叠" : ""
       }</h2>
       <p>${group ? `该分组包含 ${nodes.length} 个节点${group.collapsed ? "，当前在画布中处于折叠状态" : ""}。以下内容来自可编辑语义模型。` : "不属于任何分组、但仍需完整保留阅读信息的节点。"}</p>
@@ -314,28 +425,48 @@ function renderGroupMap(document: WorkflowDocument): string {
 interface BranchPageSection {
   source: WorkflowNode;
   edges: WorkflowEdge[];
+  bundleLabel: string;
   part: number;
   parts: number;
 }
 
 function branchPageSections(document: WorkflowDocument): BranchPageSection[] {
   const sections: BranchPageSection[] = [];
-  const nodeById = new Map(document.nodes.map((node) => [node.id, node]));
-  for (const source of document.nodes) {
-    const edges = document.edges.filter((edge) => edge.source === source.id);
-    if (edges.length < 2) continue;
+  const pushSection = (
+    source: WorkflowNode,
+    edges: WorkflowEdge[],
+    bundleLabel: string,
+  ) => {
     const chunks = Array.from(
       { length: Math.ceil(edges.length / 7) },
       (_, index) => edges.slice(index * 7, index * 7 + 7),
     );
     chunks.forEach((chunk, index) => {
       sections.push({
-        source: nodeById.get(source.id) ?? source,
+        source,
         edges: chunk,
+        bundleLabel,
         part: index + 1,
         parts: chunks.length,
       });
     });
+  };
+
+  for (const source of document.nodes) {
+    const outgoing = document.edges.filter((edge) => edge.source === source.id);
+    if (outgoing.length < 2) continue;
+    const sourceBundles = document.bundles.filter(
+      (bundle) => bundle.sourceId === source.id,
+    );
+    const bundledIds = new Set(sourceBundles.flatMap((bundle) => bundle.edgeIds));
+    for (const bundle of sourceBundles) {
+      const edges = outgoing.filter((edge) => bundle.edgeIds.includes(edge.id));
+      if (edges.length >= 2) pushSection(source, edges, bundle.label);
+    }
+    const independent = outgoing.filter((edge) => !bundledIds.has(edge.id));
+    if (independent.length > 0) {
+      pushSection(source, independent, "");
+    }
   }
   return sections;
 }
@@ -354,7 +485,11 @@ function renderBranchPage(
     <div class="pdf-detail-title">
       <div class="pdf-kicker">BRANCH ${section.part} / ${section.parts}</div>
       <h2>${escapeHtml(section.source.title)} · 出口条件</h2>
-      <p>该源节点共有 ${document.edges.filter((edge) => edge.source === section.source.id).length} 条出边。所有分支从同一计算分叉点出发。</p>
+      <p>${
+        section.bundleLabel
+          ? `分支束“${escapeHtml(section.bundleLabel)}”包含 ${section.edges.length} 条可见细枝，所有细枝从同一计算分叉点出发。`
+          : `该源节点有 ${section.edges.length} 条独立出口；每条边按各自的相对位置计算触点和路由。`
+      }</p>
     </div>
     <table class="pdf-branch-table">
       <thead><tr><th>目标节点</th><th>方向</th><th>条件 / 标签</th><th>状态</th></tr></thead>
@@ -376,6 +511,7 @@ function renderBranchPage(
 }
 
 export function createPrintHtml(document: WorkflowDocument): string {
+  const palette = PALETTES[document.display.palette] ?? PALETTES.default;
   const groupedNodeIds = new Set(
     document.groups.flatMap((group) => group.nodeIds),
   );
@@ -386,7 +522,7 @@ export function createPrintHtml(document: WorkflowDocument): string {
       nodes: document.nodes.filter((node) => group.nodeIds.includes(node.id)),
     })),
     ...(ungrouped.length > 0 ? [{ group: undefined, nodes: ungrouped }] : []),
-  ].filter((section) => section.nodes.length > 0 || section.group);
+  ].filter((section) => section.nodes.length > 0);
 
   const detailPages: Array<{
     group?: WorkflowGroup;
@@ -433,62 +569,79 @@ export function createPrintHtml(document: WorkflowDocument): string {
 <style>
   @page { size: A4 portrait; margin: 0; }
   * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; background: #eeeae2; color: #2d2a25; font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; }
+  html, body { margin: 0; padding: 0; background: ${palette.colors.canvas}; color: ${palette.colors.ink}; font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; }
   body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  .print-page { width: 210mm; height: 297mm; padding: 15mm 16mm 13mm; background: #fbfaf6; margin: 0 auto 10mm; position: relative; page-break-after: always; overflow: hidden; display: flex; flex-direction: column; }
+  .print-page { width: 210mm; height: 297mm; padding: 15mm 16mm 13mm; background: ${palette.colors.surface}; margin: 0 auto 10mm; position: relative; page-break-after: always; overflow: hidden; display: flex; flex-direction: column; color: ${palette.colors.ink}; }
   .print-page:last-child { page-break-after: auto; }
-  .pdf-page-header { display: flex; justify-content: space-between; align-items: center; color: #82796b; font-size: 10px; letter-spacing: .08em; border-bottom: 1px solid #dcd6cb; padding-bottom: 8px; }
-  .pdf-brand { font-weight: 700; color: #3e3a33; letter-spacing: .12em; }
+  .pdf-page-header { display: flex; justify-content: space-between; align-items: center; color: ${palette.colors.muted}; font-size: 10px; letter-spacing: .08em; border-bottom: 1px solid ${palette.colors.muted}; padding-bottom: 8px; }
+  .pdf-brand { font-weight: 700; color: ${palette.colors.ink}; letter-spacing: .12em; }
   .pdf-title-block { padding: 24px 0 17px; }
-  .pdf-kicker { font-size: 9px; font-weight: 700; letter-spacing: .16em; color: #85806e; margin-bottom: 9px; }
+  .pdf-kicker { font-size: 9px; font-weight: 700; letter-spacing: .16em; color: ${palette.colors.muted}; margin-bottom: 9px; }
   .pdf-title-block h1 { font-family: "STSong", "Songti SC", "Microsoft YaHei", serif; font-size: 30px; line-height: 1.2; margin: 0 0 10px; font-weight: 650; letter-spacing: -.02em; }
-  .pdf-title-block > p { margin: 0; color: #625d54; font-size: 12px; line-height: 1.65; max-width: 165mm; }
-  .pdf-meta { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 14px; font-size: 9px; color: #8a8275; }
-  .pdf-meta strong { color: #4c463d; font-weight: 600; }
-  .pdf-overview-frame { flex: 1; min-height: 0; border: 1px solid #ddd7cc; border-radius: 16px; padding: 14px; background-color: #f8f6f0; background-image: radial-gradient(#d8d2c7 .7px, transparent .7px); background-size: 16px 16px; display: flex; align-items: center; justify-content: center; }
+  .pdf-title-block > p { margin: 0; color: ${palette.colors.muted}; font-size: 12px; line-height: 1.65; max-width: 165mm; }
+  .pdf-meta { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 14px; font-size: 9px; color: ${palette.colors.muted}; }
+  .pdf-meta strong { color: ${palette.colors.ink}; font-weight: 600; }
+  .pdf-overview-frame { flex: 1; min-height: 0; border: 1px solid ${palette.colors.muted}; border-radius: 16px; padding: 14px; background-color: ${palette.colors.canvas}; background-image: radial-gradient(${palette.colors.muted} 0.7px, transparent 0.7px); background-size: 16px 16px; display: flex; align-items: center; justify-content: center; }
   .pdf-graph { width: 100%; height: 100%; max-height: 152mm; overflow: visible; }
-  .pdf-group rect { fill: rgba(222, 230, 216, .34); stroke: #b8c7ad; stroke-width: 1.5; }
-  .pdf-group.is-collapsed rect { fill: rgba(238, 231, 218, .72); stroke: #c4b18f; stroke-dasharray: 6 4; }
-  .pdf-group-label { font-size: 14px; font-weight: 700; fill: #68735f; paint-order: stroke; stroke: #f8f6f0; stroke-width: 5px; stroke-linejoin: round; }
-  .pdf-edge-trunk { fill: none; stroke: #8b8173; stroke-width: 1.7; }
-  .pdf-edge path { fill: none; stroke: #8b8173; stroke-width: 1.7; }
-  .pdf-edge text { font-size: 11px; fill: #685f52; paint-order: stroke; stroke: #f8f6f0; stroke-width: 4px; }
-  .pdf-node rect { fill: #fffefa; stroke: #bdb5a7; stroke-width: 1.3; }
-  .pdf-node--start rect, .pdf-node--end rect { fill: #e4ebdf; stroke: #8da27d; }
-  .pdf-node--decision rect { fill: #f1e7d8; stroke: #b79b75; }
-  .pdf-node-title { font-size: 14px; fill: #302c27; font-weight: 650; }
+  .pdf-group rect { fill: ${palette.colors.canvas}; stroke: ${palette.colors.muted}; stroke-width: 1.5; }
+  .pdf-group.is-important rect { fill: ${palette.colors.canvas}; stroke: ${palette.colors.important}; stroke-width: 2.4; }
+  .pdf-group.is-collapsed rect { fill: ${palette.colors.canvas}; stroke: ${palette.colors.muted}; stroke-dasharray: 6 4; }
+  .pdf-group-label { font-size: 14px; font-weight: 700; fill: ${palette.colors.ink}; paint-order: stroke; stroke: ${palette.colors.canvas}; stroke-width: 5px; stroke-linejoin: round; }
+  .pdf-edge-trunk { fill: none; stroke: ${palette.colors.edge}; stroke-width: 1.7; }
+  .pdf-edge path { fill: none; stroke: ${palette.colors.edge}; stroke-width: 1.7; }
+  .pdf-edge-trunk, .pdf-edge.is-bundle-arm path { stroke: ${palette.colors.branch}; }
+  .pdf-edge text { font-size: 11px; fill: ${palette.colors.ink}; paint-order: stroke; stroke: ${palette.colors.canvas}; stroke-width: 4px; }
+  .pdf-node > path { fill: ${palette.colors.node}; stroke: ${palette.colors.muted}; stroke-width: 1.3; }
+  .pdf-node--start > path { fill: ${palette.colors.start}; stroke: ${palette.colors.start}; stroke-width: 2; }
+  .pdf-node--end > path { fill: ${palette.colors.end}; stroke: ${palette.colors.end}; stroke-width: 2; }
+  .pdf-node--decision > path { fill: ${palette.colors.decision}; stroke: ${palette.colors.muted}; }
+  .pdf-node--fork > path { stroke: ${palette.colors.bundle}; stroke-width: 2; }
+  .pdf-node--note > path { fill: ${palette.colors.note}; stroke: ${palette.colors.muted}; stroke-dasharray: 4 3; }
+  .pdf-node.is-important > path { stroke: ${palette.colors.important}; stroke-width: 2.5; }
+  .pdf-node.is-milestone:not(.is-important) > path { stroke: ${palette.colors.milestone}; stroke-width: 2.4; }
+  .pdf-node-title { font-size: 14px; fill: ${palette.colors.ink}; font-weight: 650; }
+  .pdf-node--start .pdf-node-title, .pdf-node--end .pdf-node-title { fill: #fffaf0; }
   .pdf-node-type { font-size: 9px; fill: #928777; letter-spacing: .08em; }
+  .pdf-node-milestone { font-size: 8px; font-weight: 700; fill: ${palette.colors.ink}; }
+  .pdf-fork-count circle { fill: ${palette.colors.surface}; stroke: ${palette.colors.bundle}; stroke-width: 1.2; }
+  .pdf-fork-count text { font-size: 9px; font-weight: 750; fill: ${palette.colors.bundle}; }
+  .pdf-bundle-label rect { fill: ${palette.colors.surface}; stroke: ${palette.colors.bundle}; stroke-width: 1; }
+  .pdf-bundle-label text { font-size: 8px; font-weight: 700; fill: ${palette.colors.bundle}; }
+  .pdf-edge.is-important path { stroke: ${palette.colors.important}; stroke-width: 2.3; }
+  .pdf-edge.is-note-edge path { stroke: ${palette.colors.muted}; stroke-dasharray: 5 4; }
   .pdf-summary-strip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; margin-top: 12px; }
-  .pdf-summary-strip span { background: #f1eee6; border-radius: 7px; padding: 8px 10px; color: #776f62; font-size: 9px; }
-  .pdf-summary-strip strong { color: #34302a; font-size: 14px; margin-right: 4px; }
-  .pdf-group-map { width: 100%; }
-  .pdf-group-map > p { margin: 0 0 12px; color: #756e62; font-size: 10px; line-height: 1.6; }
+  .pdf-summary-strip span { background: ${palette.colors.canvas}; border-radius: 7px; padding: 8px 10px; color: ${palette.colors.muted}; font-size: 9px; }
+  .pdf-summary-strip strong { color: ${palette.colors.ink}; font-size: 14px; margin-right: 4px; }
+  .pdf-group-map { width: 100%; align-self: stretch; padding-top: 20px; }
+  .pdf-group-map > p { margin: 0 0 12px; color: ${palette.colors.muted}; font-size: 10px; line-height: 1.6; }
   .pdf-group-map-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-  .pdf-group-map-card { padding: 12px; border: 1px solid #d7d0c4; border-radius: 9px; background: #fffefa; }
+  .pdf-group-map-card { padding: 12px; border: 1px solid ${palette.colors.muted}; border-radius: 9px; background: ${palette.colors.surface}; }
   .pdf-group-map-card strong { display: block; margin-bottom: 5px; font-size: 12px; }
-  .pdf-group-map-card span { color: #81796c; font-size: 9px; }
-  .pdf-legend { display: flex; flex-wrap: wrap; gap: 12px 22px; align-items: center; margin: 10px 2px 0; color: #71695d; font-size: 8.5px; }
+  .pdf-group-map-card span { color: ${palette.colors.muted}; font-size: 9px; }
+  .pdf-legend { display: flex; flex-wrap: wrap; gap: 12px 22px; align-items: center; margin: 10px 2px 0; color: ${palette.colors.muted}; font-size: 8.5px; }
   .pdf-legend span { display: inline-flex; align-items: center; gap: 6px; }
-  .legend-line { width: 20px; height: 1px; background: #8b8173; position: relative; }
-  .legend-line::after { content: ""; position: absolute; right: -1px; top: -2px; border-left: 4px solid #8b8173; border-top: 2.5px solid transparent; border-bottom: 2.5px solid transparent; }
-  .legend-box { width: 12px; height: 9px; border-radius: 2px; border: 1px solid #bdb5a7; background: #fffefa; }
-  .legend-start { background: #e4ebdf; border-color: #8da27d; }
-  .legend-task { background: #fffefa; }
-  .legend-decision { background: #f1e7d8; border-color: #b79b75; }
+  .legend-line { width: 20px; height: 1px; background: ${palette.colors.edge}; position: relative; }
+  .legend-line::after { content: ""; position: absolute; right: -1px; top: -2px; border-left: 4px solid ${palette.colors.edge}; border-top: 2.5px solid transparent; border-bottom: 2.5px solid transparent; }
+  .legend-box { width: 12px; height: 9px; border-radius: 2px; border: 1px solid ${palette.colors.muted}; background: ${palette.colors.node}; }
+  .legend-start { background: ${palette.colors.start}; border-color: ${palette.colors.start}; }
+  .legend-task { background: ${palette.colors.node}; }
+  .legend-decision { background: ${palette.colors.decision}; border-color: ${palette.colors.muted}; }
+  .legend-fork { border-radius: 999px; background: ${palette.colors.bundle}; border-color: ${palette.colors.bundle}; }
   .legend-import { border-left: 3px solid #738968; }
-  .pdf-footer { margin-top: auto; padding-top: 10px; border-top: 1px solid #e3ded5; display: flex; justify-content: space-between; font-size: 8.5px; color: #948b7e; }
+  .pdf-footer { margin-top: auto; padding-top: 10px; border-top: 1px solid ${palette.colors.muted}; display: flex; justify-content: space-between; font-size: 8.5px; color: ${palette.colors.muted}; }
   .pdf-detail-title { padding: 21px 0 15px; }
   .pdf-detail-title h2 { margin: 0 0 7px; font-size: 23px; }
-  .pdf-detail-title p { margin: 0; color: #756e62; font-size: 10px; }
+  .pdf-detail-title p { margin: 0; color: ${palette.colors.muted}; font-size: 10px; }
   .pdf-detail-list { display: flex; flex-direction: column; gap: 9px; flex: 1; }
   .pdf-branch-table { width: 100%; border-collapse: collapse; }
-  .pdf-branch-table th { padding: 7px 8px; border-bottom: 1px solid #cabfae; color: #756d60; font-size: 8px; text-align: left; }
-  .pdf-branch-table td { padding: 8px; border-bottom: 1px solid #e5dfd5; color: #4f493f; font-size: 9px; line-height: 1.45; }
-  .pdf-node-detail { border: 1px solid #ddd7cc; border-radius: 10px; padding: 10px 13px; background: #fffefa; page-break-inside: avoid; }
-  .pdf-detail-head { display: flex; justify-content: space-between; gap: 12px; color: #8b8276; font-size: 8px; }
+  .pdf-branch-table th { padding: 7px 8px; border-bottom: 1px solid ${palette.colors.muted}; color: ${palette.colors.muted}; font-size: 8px; text-align: left; }
+  .pdf-branch-table td { padding: 8px; border-bottom: 1px solid ${palette.colors.muted}; color: ${palette.colors.ink}; font-size: 9px; line-height: 1.45; }
+  .pdf-node-detail { border: 1px solid ${palette.colors.muted}; border-radius: 10px; padding: 10px 13px; background: ${palette.colors.surface}; page-break-inside: avoid; }
+  .pdf-detail-head { display: flex; justify-content: space-between; gap: 12px; color: ${palette.colors.muted}; font-size: 8px; }
   .pdf-kind { text-transform: uppercase; letter-spacing: .08em; font-weight: 700; color: #5e7055; }
   .pdf-node-detail h3 { margin: 5px 0; font-size: 13px; }
-  .pdf-node-detail p { margin: 0; color: #5e584f; font-size: 9.5px; line-height: 1.55; white-space: pre-wrap; }
+  .pdf-node-detail p { margin: 0; color: ${palette.colors.muted}; font-size: 9.5px; line-height: 1.55; white-space: pre-wrap; }
+  .pdf-detail-flags { display: flex; gap: 6px; margin-top: 6px; color: ${palette.colors.important}; font-size: 8px; font-weight: 700; }
   .pdf-tags { display: flex; gap: 5px; margin-top: 6px; flex-wrap: wrap; }
   .pdf-tags span { background: #eef1e8; border-radius: 10px; padding: 2px 7px; color: #65735c; font-size: 7.5px; }
   .pdf-source { margin-top: 6px; color: #8d857a; font-family: Consolas, monospace; font-size: 7.5px; }

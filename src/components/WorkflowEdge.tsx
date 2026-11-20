@@ -9,8 +9,13 @@ import type { Point } from "../core/types";
 export interface WorkflowEdgeData extends Record<string, unknown> {
   label?: string;
   onSelect: (edgeId: string) => void;
+  onPointerDown: (edgeId: string, event: React.PointerEvent<SVGPathElement>) => void;
+  onContextMenu: (edgeId: string, event: React.MouseEvent<SVGPathElement>) => void;
   path: string;
   labelPoint: Point;
+  important?: boolean;
+  noteEdge?: boolean;
+  simplified?: boolean;
 }
 
 export type WorkflowFlowEdge = Edge<WorkflowEdgeData, "workflowEdge">;
@@ -32,7 +37,9 @@ export function WorkflowEdgeView({
         path={path}
         markerEnd={markerEnd}
         style={style}
-        className={`workflow-edge ${selected ? "is-selected" : ""}`}
+        className={`workflow-edge ${selected ? "is-selected" : ""} ${
+          data?.important ? "is-important" : ""
+        } ${data?.noteEdge ? "is-note-edge" : ""}`}
       />
       <path
         d={path}
@@ -44,15 +51,17 @@ export function WorkflowEdgeView({
         data-edge-target={target}
         style={{ pointerEvents: "stroke", cursor: "pointer" }}
         onPointerDown={(event) => {
+          if (event.button !== 0) return;
           event.stopPropagation();
-          data?.onSelect(id);
+          data?.onPointerDown(id, event);
         }}
-        onClick={(event) => {
+        onContextMenu={(event) => {
+          event.preventDefault();
           event.stopPropagation();
-          data?.onSelect(id);
+          data?.onContextMenu(id, event);
         }}
       />
-      {data?.label ? (
+      {data?.label && !data.simplified ? (
         <EdgeLabelRenderer>
           <button
             className="edge-label nodrag nopan"

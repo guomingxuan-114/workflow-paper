@@ -101,6 +101,7 @@ export function createHostMiddleware(workspaceRoot, options = {}) {
         await fs.mkdir(documentsDir, { recursive: true });
         return json(response, 200, {
           host: "local-shell",
+          appVersion: productConfig.appVersion,
           atomicSave: true,
           documentsDir,
         });

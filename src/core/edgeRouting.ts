@@ -1,17 +1,32 @@
 import { getHiddenNodeIds } from "./document";
+import {
+  boundaryPointToward,
+  distributeBoundaryPoints,
+  nodeContainsPoint,
+} from "./nodeShapes";
 import type {
   Point,
+  WorkflowBundle,
   WorkflowDocument,
   WorkflowEdge,
   WorkflowLayout,
+  WorkflowNode,
 } from "./types";
 
 export type RouteSide = "left" | "right" | "top" | "bottom";
+
+interface CurveSegment {
+  start: Point;
+  control1: Point;
+  control2: Point;
+  end: Point;
+}
 
 export interface EdgeRoute {
   edgeId: string;
   sourceId: string;
   targetId: string;
+  bundleId?: string;
   sourcePoint: Point;
   forkPoint: Point;
   targetPoint: Point;
@@ -20,81 +35,73 @@ export interface EdgeRoute {
   control1: Point;
   control2: Point;
   path: string;
+  segments: CurveSegment[];
   hitPoints: Point[];
   labelPoint: Point;
   side: RouteSide;
+  important: boolean;
 }
 
 export interface BranchPoint {
   id: string;
+  bundleId: string;
   sourceId: string;
   point: Point;
+  labelPoint: Point;
+  label: string;
+  visible: boolean;
   edgeIds: string[];
   side: RouteSide;
+  trunkPath: string;
 }
 
 export interface WorkflowRouting {
   routes: Record<string, EdgeRoute>;
   branches: Record<string, BranchPoint>;
+  cacheHits: number;
 }
+
+interface CachedGroup {
+  signature: string;
+  routes: EdgeRoute[];
+  branch?: BranchPoint;
+}
+
+export type RoutingCache = Map<string, CachedGroup>;
 
 type NodeRect = WorkflowLayout["nodes"][string];
 
-function center(rect: NodeRect): Point {
+export function documentWithNodePositions(
+  document: WorkflowDocument,
+  positions: Record<string, Point>,
+): WorkflowDocument {
+  const changed = Object.entries(positions).filter(
+    ([id, point]) =>
+      document.layout.nodes[id] &&
+      (document.layout.nodes[id].x !== point.x ||
+        document.layout.nodes[id].y !== point.y),
+  );
+  if (changed.length === 0) return document;
+  const nodes = { ...document.layout.nodes };
+  for (const [id, point] of changed) {
+    nodes[id] = { ...nodes[id], x: point.x, y: point.y };
+  }
   return {
-    x: rect.x + rect.width / 2,
-    y: rect.y + rect.height / 2,
+    ...document,
+    layout: { ...document.layout, nodes },
   };
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
+function center(rect: NodeRect): Point {
+  return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
 }
 
-function sourceSide(rect: NodeRect, target: Point): RouteSide {
+function sideToward(rect: NodeRect, target: Point): RouteSide {
   const origin = center(rect);
   const dx = target.x - origin.x;
   const dy = target.y - origin.y;
   if (Math.abs(dx) >= Math.abs(dy)) return dx >= 0 ? "right" : "left";
   return dy >= 0 ? "bottom" : "top";
-}
-
-function pointOnSide(rect: NodeRect, side: RouteSide, along?: number): Point {
-  if (side === "left" || side === "right") {
-    return {
-      x: side === "left" ? rect.x : rect.x + rect.width,
-      y: clamp(along ?? rect.y + rect.height / 2, rect.y + 14, rect.y + rect.height - 14),
-    };
-  }
-  return {
-    x: clamp(along ?? rect.x + rect.width / 2, rect.x + 16, rect.x + rect.width - 16),
-    y: side === "top" ? rect.y : rect.y + rect.height,
-  };
-}
-
-function trunkLength(
-  source: NodeRect,
-  targets: NodeRect[],
-  side: RouteSide,
-): number {
-  const sourceCenter = center(source);
-  const gaps = targets.map((rect) => {
-    if (side === "right") return rect.x - (source.x + source.width);
-    if (side === "left") return source.x - (rect.x + rect.width);
-    if (side === "bottom") return rect.y - (source.y + source.height);
-    return source.y - (rect.y + rect.height);
-  });
-  const directDistance = Math.hypot(
-    sourceCenter.x - center(targets[0]).x,
-    sourceCenter.y - center(targets[0]).y,
-  );
-  const positiveGaps = gaps.filter((value) => value > 0);
-  const available =
-    positiveGaps.length > 0 ? Math.min(...positiveGaps) : directDistance;
-  return Math.max(
-    18,
-    Math.min(78, available * 0.45),
-  );
 }
 
 function offsetPoint(point: Point, side: RouteSide, length: number): Point {
@@ -104,52 +111,112 @@ function offsetPoint(point: Point, side: RouteSide, length: number): Point {
   return { x: point.x, y: point.y + length };
 }
 
-function targetPointFor(rect: NodeRect, from: Point): { point: Point; side: RouteSide } {
-  const origin = center(rect);
-  const dx = from.x - origin.x;
-  const dy = from.y - origin.y;
-  const side: RouteSide =
-    Math.abs(dx) >= Math.abs(dy)
-      ? dx <= 0
-        ? "left"
-        : "right"
-      : dy <= 0
-        ? "top"
-        : "bottom";
-  const along =
-    side === "left" || side === "right"
-      ? clamp(from.y, rect.y + 16, rect.y + rect.height - 16)
-      : clamp(from.x, rect.x + 16, rect.x + rect.width - 16);
-  return { point: pointOnSide(rect, side, along), side };
+function trunkLength(source: NodeRect, targets: NodeRect[], side: RouteSide) {
+  const gaps = targets.map((rect) => {
+    if (side === "right") return rect.x - (source.x + source.width);
+    if (side === "left") return source.x - (rect.x + rect.width);
+    if (side === "bottom") return rect.y - (source.y + source.height);
+    return source.y - (rect.y + rect.height);
+  });
+  const positive = gaps.filter((value) => value > 0);
+  return Math.max(
+    56,
+    Math.min(
+      110,
+      (positive.length > 0
+        ? Math.min(...positive)
+        : Math.min(source.width, source.height) * 0.4) * 0.42,
+    ),
+  );
 }
 
-function armSegment(
+function sideNormal(side: RouteSide): Point {
+  if (side === "left") return { x: -1, y: 0 };
+  if (side === "right") return { x: 1, y: 0 };
+  if (side === "top") return { x: 0, y: -1 };
+  return { x: 0, y: 1 };
+}
+
+function oppositeSide(side: RouteSide): RouteSide {
+  if (side === "left") return "right";
+  if (side === "right") return "left";
+  if (side === "top") return "bottom";
+  return "top";
+}
+
+function buildCurve(
   from: Point,
   to: Point,
   fromSide: RouteSide,
-): { path: string; control1: Point; control2: Point } {
-  const dx = to.x - from.x;
-  const dy = to.y - from.y;
-  if (fromSide === "left" || fromSide === "right") {
-    const bend = Math.max(28, Math.abs(dx) * 0.42);
-    const direction = fromSide === "right" ? 1 : -1;
-    const control1 = { x: from.x + direction * bend, y: from.y };
-    const control2 = { x: to.x - direction * bend, y: to.y };
-    return {
-      path: `C ${control1.x} ${control1.y}, ${control2.x} ${control2.y}, ${to.x} ${to.y}`,
-      control1,
-      control2,
-    };
-  }
-  const bend = Math.max(28, Math.abs(dy) * 0.42);
-  const direction = fromSide === "bottom" ? 1 : -1;
-  const control1 = { x: from.x, y: from.y + direction * bend };
-  const control2 = { x: to.x, y: to.y - direction * bend };
+  toSide: RouteSide,
+): CurveSegment & { command: string } {
+  const distance = Math.max(1, Math.hypot(to.x - from.x, to.y - from.y));
+  const bend = Math.max(22, Math.min(35, distance * 0.22));
+  const drift = Math.min(0.06, Math.max(0.04, 28 / distance));
+  const fromNormal = sideNormal(fromSide);
+  const toNormal = sideNormal(toSide);
+  const control1 = {
+    x: from.x + fromNormal.x * bend + (to.x - from.x) * drift,
+    y: from.y + fromNormal.y * bend + (to.y - from.y) * drift,
+  };
+  const control2 = {
+    x: to.x + toNormal.x * bend + (from.x - to.x) * drift * 0.8,
+    y: to.y + toNormal.y * bend + (from.y - to.y) * drift * 0.8,
+  };
   return {
-    path: `C ${control1.x} ${control1.y}, ${control2.x} ${control2.y}, ${to.x} ${to.y}`,
+    start: from,
     control1,
     control2,
+    end: to,
+    command: `C ${control1.x} ${control1.y}, ${control2.x} ${control2.y}, ${to.x} ${to.y}`,
   };
+}
+
+function buildForwardCurve(
+  from: Point,
+  to: Point,
+): CurveSegment & { command: string } {
+  const control1 = {
+    x: from.x + (to.x - from.x) * 0.38,
+    y: from.y + (to.y - from.y) * 0.38,
+  };
+  const control2 = {
+    x: from.x + (to.x - from.x) * 0.72,
+    y: from.y + (to.y - from.y) * 0.72,
+  };
+  return {
+    start: from,
+    control1,
+    control2,
+    end: to,
+    command: `C ${control1.x} ${control1.y}, ${control2.x} ${control2.y}, ${to.x} ${to.y}`,
+  };
+}
+
+function curvePath(segment: CurveSegment & { command?: string }): string {
+  return `M ${segment.start.x} ${segment.start.y} ${
+    segment.command ??
+    `C ${segment.control1.x} ${segment.control1.y}, ${segment.control2.x} ${segment.control2.y}, ${segment.end.x} ${segment.end.y}`
+  }`;
+}
+
+function curveSamples(
+  segment: CurveSegment,
+  steps: number,
+): Point[] {
+  const points: Point[] = [];
+  for (let index = 0; index <= steps; index += 1) {
+    points.push(
+      cubicPoint(
+        segment.start,
+        segment.control1,
+        segment.control2,
+        segment.end,
+        index / steps,
+      ),
+    );
+  }
+  return points;
 }
 
 function visibleEdges(
@@ -171,112 +238,313 @@ function visibleEdges(
   });
 }
 
-function buildSourceGroup(
-  sourceId: string,
-  side: RouteSide,
+function groupSignature(
+  source: WorkflowNode,
+  sourceLayout: NodeRect,
   edges: WorkflowEdge[],
-  layout: WorkflowLayout,
+  bundle: WorkflowBundle | undefined,
+  document: WorkflowDocument,
+) {
+  return JSON.stringify({
+    source: {
+      id: source.id,
+      type: source.type,
+      milestone: source.milestone,
+      important: source.important,
+      layout: sourceLayout,
+    },
+    edges: edges.map((edge) => ({
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      targetNode: document.nodes.find((node) => node.id === edge.target),
+      targetLayout: document.layout.nodes[edge.target],
+      label: edge.label,
+      important: edge.important,
+    })),
+    bundle,
+  });
+}
+
+function buildEdgeGroup(
+  source: WorkflowNode,
+  sourceLayout: NodeRect,
+  edges: WorkflowEdge[],
+  document: WorkflowDocument,
+  bundle?: WorkflowBundle,
+  distributedSourcePoint?: Point,
+  distributedTargetPoints: Record<string, Point> = {},
 ): { routes: EdgeRoute[]; branch?: BranchPoint } {
-  const source = layout.nodes[sourceId];
   const targets = edges
-    .map((edge) => layout.nodes[edge.target])
-    .filter((rect): rect is NodeRect => Boolean(rect));
-  if (!source || targets.length === 0) return { routes: [] };
+    .map((edge) => ({
+      edge,
+      node: document.nodes.find((node) => node.id === edge.target),
+      layout: document.layout.nodes[edge.target],
+    }))
+    .filter(
+      (item): item is {
+        edge: WorkflowEdge;
+        node: WorkflowNode;
+        layout: NodeRect;
+      } => Boolean(item.node && item.layout),
+    );
+  if (targets.length === 0) return { routes: [] };
 
-  const averageTarget = {
-    x: targets.reduce((sum, rect) => sum + center(rect).x, 0) / targets.length,
-    y: targets.reduce((sum, rect) => sum + center(rect).y, 0) / targets.length,
+  const average = {
+    x:
+      targets.reduce((sum, item) => sum + center(item.layout).x, 0) /
+      targets.length,
+    y:
+      targets.reduce((sum, item) => sum + center(item.layout).y, 0) /
+      targets.length,
   };
-  const along =
-    side === "left" || side === "right" ? averageTarget.y : averageTarget.x;
-  const exit = pointOnSide(source, side, along);
-  const fork = offsetPoint(exit, side, trunkLength(source, targets, side));
+  const side = sideToward(sourceLayout, {
+    x: distributedSourcePoint?.x ?? average.x,
+    y: distributedSourcePoint?.y ?? average.y,
+  });
+  const shared = Boolean(bundle && edges.length > 1);
+  const sourcePoint = shared
+    ? distributedSourcePoint ??
+      boundaryPointToward(source, sourceLayout, average)
+    : distributedSourcePoint ??
+      boundaryPointToward(
+        source,
+        sourceLayout,
+        center(targets[0].layout),
+      );
+  const fork = shared
+    ? offsetPoint(
+        sourcePoint,
+        side,
+        trunkLength(
+          sourceLayout,
+          targets.map((item) => item.layout),
+          side,
+        ),
+      )
+    : sourcePoint;
+  const trunk = shared
+    ? buildForwardCurve(sourcePoint, fork)
+    : undefined;
 
-  const routes = edges.map((edge, index): EdgeRoute => {
-    const targetRect = layout.nodes[edge.target];
-    const target = targetPointFor(targetRect, fork);
-    const arm = armSegment(fork, target.point, side);
+  const routes = targets.map((item, index): EdgeRoute => {
+    const start = sourcePoint;
+    const targetPoint =
+      distributedTargetPoints[item.edge.id] ??
+      boundaryPointToward(item.node, item.layout, start);
+    const targetSide = sideToward(item.layout, start);
+    const armStart = shared ? fork : start;
+    const arm = buildCurve(
+      armStart,
+      targetPoint,
+      shared ? side : sideToward(sourceLayout, targetPoint),
+      targetSide,
+    );
     const midpoint = {
-      x: (fork.x + target.point.x) / 2,
-      y: (fork.y + target.point.y) / 2 - (target.side === "bottom" ? 0 : 6),
+      x: (armStart.x + targetPoint.x) / 2,
+      y: (armStart.y + targetPoint.y) / 2 - 6,
     };
     const armLength = Math.max(
       1,
-      Math.hypot(target.point.x - fork.x, target.point.y - fork.y),
+      Math.hypot(
+        targetPoint.x - armStart.x,
+        targetPoint.y - armStart.y,
+      ),
     );
     const spread =
-      edges.length > 1 ? (index - (edges.length - 1) / 2) * 13 : 0;
-    const labelPoint = {
-      x:
-        midpoint.x +
-        (-(target.point.y - fork.y) / armLength) * spread,
-      y:
-        midpoint.y +
-        ((target.point.x - fork.x) / armLength) * spread,
-    };
+      edges.length > 1 ? (index - (edges.length - 1) / 2) * 14 : 0;
+    const segments = trunk ? [trunk, arm] : [arm];
     return {
-      edgeId: edge.id,
-      sourceId,
-      targetId: edge.target,
-      sourcePoint: exit,
+      edgeId: item.edge.id,
+      sourceId: source.id,
+      targetId: item.edge.target,
+      bundleId: bundle?.id,
+      sourcePoint: start,
       forkPoint: fork,
-      targetPoint: target.point,
-      trunkPath: `M ${exit.x} ${exit.y} L ${fork.x} ${fork.y}`,
-      armPath: arm.path,
+      targetPoint,
+      trunkPath: trunk ? curvePath(trunk) : "",
+      armPath: arm.command,
       control1: arm.control1,
       control2: arm.control2,
-      path: `M ${exit.x} ${exit.y} L ${fork.x} ${fork.y} ${arm.path}`,
-      hitPoints: [exit, fork, target.point],
-      labelPoint,
+      path: trunk
+        ? `${curvePath(trunk)} ${arm.command}`
+        : curvePath(arm),
+      segments,
+      hitPoints: segments.flatMap((segment, segmentIndex) =>
+        curveSamples(segment, 12).slice(segmentIndex === 0 ? 0 : 1),
+      ),
+      labelPoint: {
+        x:
+          midpoint.x +
+          (-(targetPoint.y - armStart.y) / armLength) * spread,
+        y:
+          midpoint.y +
+          ((targetPoint.x - armStart.x) / armLength) * spread,
+      },
       side,
+      important: Boolean(item.edge.important),
     };
   });
 
+  if (!bundle || routes.length < 2) return { routes };
+  const rawLabelPoint = {
+    x: (sourcePoint.x + fork.x) / 2,
+    y: (sourcePoint.y + fork.y) / 2 - 12,
+  };
+  const labelPoint =
+    Number.isFinite(rawLabelPoint.x) && Number.isFinite(rawLabelPoint.y)
+      ? rawLabelPoint
+      : { x: fork.x, y: fork.y - 12 };
   return {
     routes,
-    ...(edges.length > 1
-      ? {
-          branch: {
-            id: `${sourceId}:${side}`,
-            sourceId,
-            point: fork,
-            edgeIds: edges.map((edge) => edge.id),
-            side,
-          },
-        }
-      : {}),
+    branch: {
+      id: bundle.id,
+      bundleId: bundle.id,
+      sourceId: source.id,
+      point: fork,
+      labelPoint,
+      label: bundle.label,
+      visible: bundle.visible,
+      edgeIds: routes.map((route) => route.edgeId),
+      side,
+      trunkPath: routes[0].trunkPath,
+    },
   };
 }
 
 export function buildWorkflowRouting(
   document: WorkflowDocument,
   visibleNodeIds?: Set<string>,
+  cache?: RoutingCache,
 ): WorkflowRouting {
-  const groups = new Map<string, { sourceId: string; side: RouteSide; edges: WorkflowEdge[] }>();
-  for (const edge of visibleEdges(document, visibleNodeIds)) {
-    const source = document.layout.nodes[edge.source];
-    const target = document.layout.nodes[edge.target];
-    if (!source || !target) continue;
-    const side = sourceSide(source, center(target));
-    const key = `${edge.source}:${side}`;
-    const group = groups.get(key) ?? { sourceId: edge.source, side, edges: [] };
-    group.edges.push(edge);
-    groups.set(key, group);
+  const edges = visibleEdges(document, visibleNodeIds);
+  const edgeById = new Map(edges.map((edge) => [edge.id, edge]));
+  // Legacy bundle records remain readable, but edges are never merged visually.
+  const bundles: Array<{
+    bundle: WorkflowBundle;
+    members: WorkflowEdge[];
+  }> = [];
+  const bundledIds = new Set(
+    bundles.flatMap((item) => item.members.map((edge) => edge.id)),
+  );
+  const groups = [
+    ...bundles.map(({ bundle, members }) => ({
+      key: `bundle:${bundle.id}`,
+      sourceId: bundle.sourceId,
+      edges: members,
+      bundle,
+    })),
+    ...edges
+      .filter((edge) => !bundledIds.has(edge.id))
+      .map((edge) => ({
+        key: `edge:${edge.id}`,
+        sourceId: edge.source,
+        edges: [edge],
+        bundle: undefined,
+      })),
+  ];
+  const sourcePoints: Record<string, Point> = {};
+  const groupsBySource = new Map<
+    string,
+    typeof groups
+  >();
+  for (const group of groups) {
+    const entries = groupsBySource.get(group.sourceId) ?? [];
+    entries.push(group);
+    groupsBySource.set(group.sourceId, entries);
+  }
+  for (const [sourceId, sourceGroups] of groupsBySource) {
+    const source = document.nodes.find((node) => node.id === sourceId);
+    const sourceLayout = document.layout.nodes[sourceId];
+    if (!source || !sourceLayout) continue;
+    const anchors = sourceGroups.map((group) => {
+      const targetLayouts = group.edges
+        .map((edge) => document.layout.nodes[edge.target])
+        .filter((layout): layout is NodeRect => Boolean(layout));
+      const point =
+        targetLayouts.length > 0
+          ? {
+              x:
+                targetLayouts.reduce(
+                  (sum, layout) => sum + center(layout).x,
+                  0,
+                ) / targetLayouts.length,
+              y:
+                targetLayouts.reduce(
+                  (sum, layout) => sum + center(layout).y,
+                  0,
+                ) / targetLayouts.length,
+            }
+          : center(sourceLayout);
+      return { key: group.key, point };
+    });
+    Object.assign(
+      sourcePoints,
+      distributeBoundaryPoints(source, sourceLayout, anchors),
+    );
+  }
+  const edgeToGroupKey = new Map(
+    groups.flatMap((group) =>
+      group.edges.map((edge) => [edge.id, group.key] as const),
+    ),
+  );
+  const targetCandidates = new Map<
+    string,
+    Array<{ key: string; point: Point }>
+  >();
+  for (const edge of edges) {
+    const sourcePoint = sourcePoints[edgeToGroupKey.get(edge.id) ?? ""];
+    if (!sourcePoint) continue;
+    const candidates = targetCandidates.get(edge.target) ?? [];
+    candidates.push({ key: edge.id, point: sourcePoint });
+    targetCandidates.set(edge.target, candidates);
+  }
+  const targetPoints: Record<string, Point> = {};
+  for (const [targetId, candidates] of targetCandidates) {
+    const target = document.nodes.find((node) => node.id === targetId);
+    const targetLayout = document.layout.nodes[targetId];
+    if (!target || !targetLayout) continue;
+    Object.assign(
+      targetPoints,
+      distributeBoundaryPoints(target, targetLayout, candidates),
+    );
   }
 
   const routes: Record<string, EdgeRoute> = {};
   const branches: Record<string, BranchPoint> = {};
-  for (const group of groups.values()) {
-    const result = buildSourceGroup(
-      group.sourceId,
-      group.side,
+  let cacheHits = 0;
+  for (const group of groups) {
+    const source = document.nodes.find((node) => node.id === group.sourceId);
+    const sourceLayout = document.layout.nodes[group.sourceId];
+    if (!source || !sourceLayout) continue;
+    const signature = groupSignature(
+      source,
+      sourceLayout,
       group.edges,
-      document.layout,
+      group.bundle,
+      document,
     );
-    for (const route of result.routes) routes[route.edgeId] = route;
+    const cached = cache?.get(group.key);
+    const result =
+      cached?.signature === signature
+        ? cached
+        : buildEdgeGroup(
+            source,
+            sourceLayout,
+            group.edges,
+            document,
+            group.bundle,
+            sourcePoints[group.key],
+            targetPoints,
+          );
+    if (cached?.signature === signature) cacheHits += 1;
+    cache?.set(group.key, { signature, ...result });
+    result.routes.forEach((route) => {
+      routes[route.edgeId] = route;
+    });
     if (result.branch) branches[result.branch.id] = result.branch;
   }
-  return { routes, branches };
+  return { routes, branches, cacheHits };
 }
 
 export function distanceToRoute(point: Point, route: EdgeRoute): number {
@@ -309,13 +577,6 @@ export function distanceToRoute(point: Point, route: EdgeRoute): number {
   return minimum;
 }
 
-export function branchEdges(
-  document: WorkflowDocument,
-  sourceId: string,
-): WorkflowEdge[] {
-  return document.edges.filter((edge) => edge.source === sourceId);
-}
-
 export interface ConnectionPreview {
   path: string;
   sourcePoint: Point;
@@ -329,25 +590,38 @@ export function buildConnectionPreview(
   pointer: Point,
   targetId?: string | null,
 ): ConnectionPreview | null {
-  const source = document.layout.nodes[sourceId];
-  if (!source) return null;
-  const side = sourceSide(source, pointer);
-  const sourcePoint = pointOnSide(
-    source,
-    side,
-    side === "left" || side === "right" ? pointer.y : pointer.x,
-  );
-  const target = targetId ? document.layout.nodes[targetId] : undefined;
-  const endPoint = target
-    ? targetPointFor(target, sourcePoint).point
-    : pointer;
-  const arm = armSegment(sourcePoint, endPoint, side);
+  const source = document.nodes.find((node) => node.id === sourceId);
+  const sourceLayout = document.layout.nodes[sourceId];
+  if (!source || !sourceLayout) return null;
+  const side = sideToward(sourceLayout, pointer);
+  const sourcePoint = boundaryPointToward(source, sourceLayout, pointer);
+  const target = targetId
+    ? document.nodes.find((node) => node.id === targetId)
+    : undefined;
+  const targetLayout = targetId ? document.layout.nodes[targetId] : undefined;
+  const endPoint =
+    target && targetLayout
+      ? boundaryPointToward(target, targetLayout, sourcePoint)
+      : pointer;
+  const endSide =
+    target && targetLayout
+      ? sideToward(targetLayout, sourcePoint)
+      : oppositeSide(side);
+  const curve = buildCurve(sourcePoint, endPoint, side, endSide);
   return {
-    path: `M ${sourcePoint.x} ${sourcePoint.y} ${arm.path}`,
+    path: curvePath(curve),
     sourcePoint,
     endPoint,
     side,
   };
+}
+
+export function buildFreePreviewPath(
+  start: Point,
+  end: Point,
+  side: RouteSide = "right",
+): string {
+  return curvePath(buildCurve(start, end, side, oppositeSide(side)));
 }
 
 function cubicPoint(
@@ -373,26 +647,13 @@ function cubicPoint(
 }
 
 export function sampleRoute(route: EdgeRoute, steps = 20): Point[] {
-  const points: Point[] = [];
-  for (let index = 0; index <= steps; index += 1) {
-    const t = index / steps;
-    points.push({
-      x: route.sourcePoint.x + (route.forkPoint.x - route.sourcePoint.x) * t,
-      y: route.sourcePoint.y + (route.forkPoint.y - route.sourcePoint.y) * t,
-    });
-  }
-  for (let index = 0; index <= steps; index += 1) {
-    points.push(
-      cubicPoint(
-        route.forkPoint,
-        route.control1,
-        route.control2,
-        route.targetPoint,
-        index / steps,
-      ),
-    );
-  }
-  return points;
+  const perSegment = Math.max(
+    4,
+    Math.ceil(steps / Math.max(1, route.segments.length)),
+  );
+  return route.segments.flatMap((segment, index) =>
+    curveSamples(segment, perSegment).slice(index === 0 ? 0 : 1),
+  );
 }
 
 export function routeIntersectsRect(
@@ -400,11 +661,104 @@ export function routeIntersectsRect(
   rect: NodeRect,
   inset = 2,
 ): boolean {
-  return sampleRoute(route).some(
+  // Boundary ports can sit inside an ellipse's rectangular bounds. Exclude
+  // the exact endpoints so this checks the routed body rather than the port.
+  return sampleRoute(route).slice(1, -1).some(
     (point) =>
       point.x > rect.x + inset &&
       point.x < rect.x + rect.width - inset &&
       point.y > rect.y + inset &&
       point.y < rect.y + rect.height - inset,
   );
+}
+
+export function routeIntersectsNode(
+  route: EdgeRoute,
+  node: WorkflowNode,
+  layout: NodeRect,
+  inset = 2,
+): boolean {
+  return sampleRoute(route)
+    .slice(1, -1)
+    .some((point) => nodeContainsPoint(node, layout, point, inset));
+}
+
+export function routePointAt(route: EdgeRoute, progress: number): Point {
+  const points = sampleRoute(route, 32);
+  const index = Math.max(0, Math.min(1, progress)) * (points.length - 1);
+  const lower = Math.floor(index);
+  const upper = Math.min(points.length - 1, lower + 1);
+  const mix = index - lower;
+  return {
+    x: points[lower].x + (points[upper].x - points[lower].x) * mix,
+    y: points[lower].y + (points[upper].y - points[lower].y) * mix,
+  };
+}
+
+export function projectPointOntoRoute(
+  point: Point,
+  route: EdgeRoute,
+  steps = 96,
+): { point: Point; progress: number; distance: number } {
+  const points = sampleRoute(route, steps);
+  const segmentLengths: number[] = [];
+  let total = 0;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const length = Math.hypot(
+      points[index + 1].x - points[index].x,
+      points[index + 1].y - points[index].y,
+    );
+    segmentLengths.push(length);
+    total += length;
+  }
+
+  let best = {
+    point: points[0],
+    progress: 0,
+    distance: Number.POSITIVE_INFINITY,
+  };
+  let travelled = 0;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const start = points[index];
+    const end = points[index + 1];
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const length = segmentLengths[index];
+    const lengthSquared = length * length;
+    const projection =
+      lengthSquared === 0
+        ? 0
+        : Math.max(
+            0,
+            Math.min(
+              1,
+              ((point.x - start.x) * dx + (point.y - start.y) * dy) /
+                lengthSquared,
+            ),
+          );
+    const projected = {
+      x: start.x + dx * projection,
+      y: start.y + dy * projection,
+    };
+    const distance = Math.hypot(
+      point.x - projected.x,
+      point.y - projected.y,
+    );
+    if (distance < best.distance) {
+      best = {
+        point: projected,
+        progress:
+          total === 0
+            ? 0
+            : (travelled + length * projection) / total,
+        distance,
+      };
+    }
+    travelled += length;
+  }
+  return best;
+}
+
+export function progressAlongRoute(point: Point, route: EdgeRoute): number {
+  return projectPointOntoRoute(point, route, 48).progress;
 }

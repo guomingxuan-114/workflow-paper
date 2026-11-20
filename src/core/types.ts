@@ -1,8 +1,8 @@
 export type NodeKind =
   | "start"
+  | "fork"
   | "task"
   | "decision"
-  | "milestone"
   | "end"
   | "note";
 
@@ -17,6 +17,7 @@ export interface Size {
 }
 
 export type WorkflowTheme = "paper" | "dark";
+export type WorkflowPalette = "default" | "bauhaus";
 
 export interface ImportedOrigin {
   kind: "import";
@@ -40,6 +41,11 @@ export interface WorkflowNode {
   type: NodeKind;
   tags: string[];
   origin: NodeOrigin;
+  milestone?: {
+    label?: string;
+    color?: string;
+  };
+  important?: boolean;
   source?: {
     file?: string;
     language?: string;
@@ -54,6 +60,8 @@ export interface WorkflowEdge {
   target: string;
   label?: string;
   origin: "manual" | "import";
+  important?: boolean;
+  bundleId?: string;
 }
 
 export interface WorkflowGroup {
@@ -62,6 +70,17 @@ export interface WorkflowGroup {
   nodeIds: string[];
   parentId?: string;
   collapsed: boolean;
+  color?: string;
+  important?: boolean;
+}
+
+export interface WorkflowBundle {
+  id: string;
+  sourceId: string;
+  forkNodeId?: string;
+  edgeIds: string[];
+  label: string;
+  visible: boolean;
   color?: string;
 }
 
@@ -90,7 +109,7 @@ export interface DocumentProvenance {
 }
 
 export interface WorkflowDocument {
-  schemaVersion: 1;
+  schemaVersion: 2;
   id: string;
   metadata: {
     title: string;
@@ -103,17 +122,19 @@ export interface WorkflowDocument {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
   groups: WorkflowGroup[];
+  bundles: WorkflowBundle[];
   layout: WorkflowLayout;
   display: {
     showDescriptions: boolean;
     theme: WorkflowTheme;
+    palette: WorkflowPalette;
   };
 }
 
 export interface WorkflowManifest {
   format: "local-workflow";
   containerVersion: 1;
-  documentSchemaVersion: 1;
+  documentSchemaVersion: 2;
   product: string;
   appVersion: string;
   createdAt: string;
@@ -125,7 +146,7 @@ export interface ImportedNodeV1 {
   id: string;
   title: string;
   description?: string;
-  type?: NodeKind;
+  type?: NodeKind | "milestone";
   tags?: string[];
   group?: string;
   source?: WorkflowNode["source"];

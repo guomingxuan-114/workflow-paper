@@ -28,6 +28,10 @@ export function ContentEditorDialog({
 }) {
   const [title, setTitle] = useState(node.title);
   const [description, setDescription] = useState(node.description);
+  const normalizedTitle = () =>
+    node.type === "fork"
+      ? title.trim()
+      : title.trim() || "未命名节点";
   return (
     <Modal
       title="编辑节点内容"
@@ -43,7 +47,7 @@ export function ContentEditorDialog({
             className="button button--primary"
             onClick={() => {
               onSave({
-                title: title.trim() || "未命名步骤",
+                title: normalizedTitle(),
                 description,
               });
               onClose();
@@ -59,7 +63,7 @@ export function ContentEditorDialog({
         onKeyDown={(event) => {
           if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
             onSave({
-              title: title.trim() || "未命名步骤",
+              title: normalizedTitle(),
               description,
             });
             onClose();
@@ -71,6 +75,9 @@ export function ContentEditorDialog({
           <input
             autoFocus
             value={title}
+            placeholder={
+              node.type === "fork" ? "填写分叉点名称" : undefined
+            }
             onChange={(event) => setTitle(event.target.value)}
           />
         </label>
@@ -446,12 +453,13 @@ export function VersionDiffDialog({
 
 export function ShortcutDialog({ onClose }: { onClose: () => void }) {
   const shortcuts = [
-    ["Tab / N", "在画布中新建步骤"],
+    ["Tab / N", "在画布中新建节点"],
     ["E / Enter", "编辑当前节点内容"],
     ["Delete", "删除所选节点、边或分组"],
     ["Cmd/Ctrl + Z", "撤销"],
     ["Cmd/Ctrl + Shift + Z", "重做"],
     ["Cmd/Ctrl + C / V", "复制与粘贴节点"],
+    ["Cmd/Ctrl + A", "选择全部对象并批量标记重要"],
     ["Cmd/Ctrl + S", "原子保存工作流"],
     ["Cmd/Ctrl + F", "查找节点"],
     ["Cmd/Ctrl + Shift + O", "切换画布与大纲"],
@@ -468,7 +476,7 @@ export function ShortcutDialog({ onClose }: { onClose: () => void }) {
         ))}
       </div>
       <p className="field-hint">
-        鼠标拖动节点只改位置；从节点右侧圆点拖到空白创建后继，拖到已有节点建立关系；点击边线可编辑标签。
+        鼠标拖动节点内部只改位置；从节点整圈边框拖到空白创建后继，拖到已有节点建立关系；点击边线可编辑标签。
       </p>
     </Modal>
   );
@@ -477,19 +485,29 @@ export function ShortcutDialog({ onClose }: { onClose: () => void }) {
 export function BranchConditionsDialog({
   source,
   edges,
+  bundleLabel,
+  bundleVisible,
   targetTitle,
   onSave,
   onClose,
 }: {
   source: WorkflowNode;
   edges: WorkflowEdge[];
+  bundleLabel: string;
+  bundleVisible: boolean;
   targetTitle: (nodeId: string) => string;
-  onSave: (labels: Record<string, string>) => void;
+  onSave: (
+    labels: Record<string, string>,
+    bundleLabel: string,
+    bundleVisible: boolean,
+  ) => void;
   onClose: () => void;
 }) {
   const [labels, setLabels] = useState<Record<string, string>>(() =>
     Object.fromEntries(edges.map((edge) => [edge.id, edge.label ?? ""])),
   );
+  const [label, setLabel] = useState(bundleLabel);
+  const [visible, setVisible] = useState(bundleVisible);
   return (
     <Modal
       title="分支条件"
@@ -497,16 +515,14 @@ export function BranchConditionsDialog({
       onClose={onClose}
       footer={
         <>
-          <span className="modal-hint">
-            条件暂存于关系的 label 字段，不改变文件 schema。
-          </span>
+          <span className="modal-hint">束标签显示在共享主干上。</span>
           <button className="button button--quiet" onClick={onClose}>
             取消
           </button>
           <button
             className="button button--primary"
             onClick={() => {
-              onSave(labels);
+              onSave(labels, label, visible);
               onClose();
             }}
           >
@@ -516,6 +532,22 @@ export function BranchConditionsDialog({
       }
     >
       <div className="branch-condition-list">
+        <label>
+          束标签
+          <input
+            value={label}
+            placeholder="例如：方针"
+            onChange={(event) => setLabel(event.target.value)}
+          />
+        </label>
+        <label className="inline-check">
+          <input
+            type="checkbox"
+            checked={visible}
+            onChange={(event) => setVisible(event.target.checked)}
+          />
+          显示束标签与分叉点
+        </label>
         {edges.map((edge) => (
           <label key={edge.id}>
             <span>

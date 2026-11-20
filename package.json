@@ -1,12 +1,15 @@
 {
   "name": "local-workflow-studio",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.3",
   "description": "本地优先的可视化工作流文档编辑器",
+  "main": "electron/main.cjs",
+  "author": "gmxtt",
   "type": "module",
   "scripts": {
     "dev": "node scripts/local-host.mjs --dev",
     "build": "tsc -b && vite build",
+    "desktop:build": "pnpm build && electron-builder --win nsis portable --x64",
     "preview": "vite preview",
     "start": "node scripts/local-host.mjs",
     "typecheck": "tsc -b --pretty false",
@@ -31,12 +34,85 @@
     "@types/react": "^19.0.3",
     "@types/react-dom": "^19.0.2",
     "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^45.3.3",
+    "electron-builder": "^26.18.0",
     "jsdom": "^25.0.1",
     "typescript": "^5.7.2",
     "vite": "^5.4.21",
     "vitest": "^2.1.8"
   },
   "packageManager": "pnpm@10.20.0",
+  "build": {
+    "appId": "com.gmxtt.workflow-studio",
+    "productName": "流程稿纸",
+    "asar": true,
+    "compression": "maximum",
+    "directories": {
+      "output": "release",
+      "buildResources": "electron/build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/main.cjs",
+      "electron/preload.cjs",
+      "product.config.json",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "docs",
+        "to": "docs"
+      },
+      {
+        "from": "examples",
+        "to": "examples"
+      },
+      {
+        "from": "output/pdf",
+        "to": "samples"
+      },
+      {
+        "from": "README.md",
+        "to": "README.md"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "electron/build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "流程稿纸",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": false,
+      "installerLanguages": [
+        "zh_CN"
+      ],
+      "language": "2052",
+      "artifactName": "流程稿纸-安装版-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "流程稿纸-便携版-${version}-${arch}.${ext}"
+    }
+  },
   "engines": {
     "node": ">=20"
   }

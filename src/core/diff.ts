@@ -13,6 +13,8 @@ function comparable(node: WorkflowNode) {
     type: node.type,
     tags: node.tags,
     source: node.source,
+    milestone: node.milestone,
+    important: Boolean(node.important),
   };
 }
 
@@ -48,8 +50,12 @@ export function compareWorkflowVersions(
   for (const edge of current.edges) {
     const previous = edgesBefore.get(edge.id);
     if (!previous) continue;
-    const fields = (["source", "target", "label"] as const).filter(
-      (field) => previous[field] !== edge[field],
+    const fields = (
+      ["source", "target", "label", "important", "bundleId"] as const
+    ).filter(
+      (field) =>
+        JSON.stringify(previous[field] ?? null) !==
+        JSON.stringify(edge[field] ?? null),
     );
     if (fields.length > 0) {
       changedEdges.push({
@@ -70,7 +76,14 @@ export function compareWorkflowVersions(
     const previous = groupsBefore.get(group.id);
     if (!previous) continue;
     const fields = (
-      ["title", "collapsed", "color", "nodeIds", "parentId"] as const
+      [
+        "title",
+        "collapsed",
+        "color",
+        "nodeIds",
+        "parentId",
+        "important",
+      ] as const
     ).filter(
       (field) =>
         JSON.stringify(previous[field]) !== JSON.stringify(group[field]),

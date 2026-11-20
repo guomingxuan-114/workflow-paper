@@ -2,10 +2,9 @@ import { stableImportId } from "./id";
 import {
   createDocument,
   GROUP_PADDING,
-  NODE_HEIGHT,
-  NODE_WIDTH,
   WorkflowValidationError,
 } from "./document";
+import { nodeMetrics } from "./nodeShapes";
 import type {
   ImportSnapshotV1,
   NodeKind,
@@ -14,8 +13,9 @@ import type {
   WorkflowNode,
 } from "./types";
 
-const importNodeTypes: NodeKind[] = [
+const importNodeTypes: Array<NodeKind | "milestone"> = [
   "start",
+  "fork",
   "task",
   "decision",
   "milestone",
@@ -171,22 +171,29 @@ export function importSnapshot(input: unknown): WorkflowDocument {
     groupIdMap.set(group.id, stableImportId(snapshot.source.id, `group:${group.id}`));
   }
 
-  const nodes: WorkflowNode[] = snapshot.nodes.map((node) => ({
-    id: stableImportId(snapshot.source.id, node.id),
-    title: node.title,
-    description: node.description ?? "",
-    type: node.type ?? "task",
-    tags: node.tags ?? [],
-    origin: {
-      kind: "import",
-      system: snapshot.source.name,
-      version: snapshot.version.label,
-      ...(snapshot.version.commit ? { commit: snapshot.version.commit } : {}),
-      originalId: node.id,
-      importedAt,
-    },
-    ...(node.source ? { source: node.source } : {}),
-  }));
+  const nodes: WorkflowNode[] = snapshot.nodes.map((node) => {
+    const legacyMilestone = node.type === "milestone";
+    return {
+      id: stableImportId(snapshot.source.id, node.id),
+      title: node.title,
+      description: node.description ?? "",
+      type: legacyMilestone ? "task" : (node.type ?? "task"),
+      tags: node.tags ?? [],
+      origin: {
+        kind: "import",
+        system: snapshot.source.name,
+        version: snapshot.version.label,
+        ...(snapshot.version.commit
+          ? { commit: snapshot.version.commit }
+          : {}),
+        originalId: node.id,
+        importedAt,
+      },
+      important: false,
+      ...(legacyMilestone ? { milestone: { label: "里程碑" } } : {}),
+      ...(node.source ? { source: node.source } : {}),
+    } as WorkflowNode;
+  });
   const nodeIdMap = new Map(
     snapshot.nodes.map((node) => [
       node.id,
@@ -206,6 +213,7 @@ export function importSnapshot(input: unknown): WorkflowDocument {
     title: group.title,
     collapsed: group.collapsed ?? false,
     color: group.color ?? "sage",
+    important: false,
     nodeIds: [],
     ...(group.parentId && groupIdMap.get(group.parentId)
       ? { parentId: groupIdMap.get(group.parentId)! }
@@ -224,7 +232,11 @@ export function importSnapshot(input: unknown): WorkflowDocument {
       const position = positions.get(originalId) ?? { x: 100, y: 100 };
       return [
         node.id,
-        { ...position, width: NODE_WIDTH, height: NODE_HEIGHT },
+        {
+          ...position,
+          width: nodeMetrics(node).width,
+          height: nodeMetrics(node).height,
+        },
       ];
     }),
   );
@@ -283,6 +295,7 @@ export function importSnapshot(input: unknown): WorkflowDocument {
       target: nodeIdMap.get(edge.target)!,
       ...(edge.label ? { label: edge.label } : {}),
       origin: "import",
+      important: false,
     })),
     groups,
     layout: {

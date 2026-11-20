@@ -34,6 +34,24 @@ async function fitAndZoomOut(page: import("@playwright/test").Page) {
   }
 }
 
+async function nodeBorderPoint(
+  node: import("@playwright/test").Locator,
+  side: "top" | "right" | "bottom" | "left",
+) {
+  const box = await node.locator(".node-border-hit-path").boundingBox();
+  if (!box) throw new Error("Node border has no dimensions");
+  if (side === "right") {
+    return { x: box.x + box.width - 1, y: box.y + box.height / 2 };
+  }
+  if (side === "left") {
+    return { x: box.x + 1, y: box.y + box.height / 2 };
+  }
+  if (side === "top") {
+    return { x: box.x + box.width / 2, y: box.y + 1 };
+  }
+  return { x: box.x + box.width / 2, y: box.y + box.height - 1 };
+}
+
 test("capture connection interaction screenshots", async ({ page }) => {
   test.setTimeout(60_000);
   const runtimeErrors: string[] = [];
@@ -58,7 +76,7 @@ test("capture connection interaction screenshots", async ({ page }) => {
     canvasBox.y + 280,
     { button: "right" },
   );
-  await page.getByRole("menuitem", { name: /新建步骤/ }).click();
+  await page.getByRole("menuitem", { name: /新建节点/ }).click();
   await hideInspector(page);
 
   const first = page.locator(".workflow-node").nth(0);
@@ -69,22 +87,20 @@ test("capture connection interaction screenshots", async ({ page }) => {
     firstBox.y + 40,
     { button: "right" },
   );
-  await page.getByRole("menuitem", { name: /新建步骤/ }).click();
+  await page.getByRole("menuitem", { name: /新建节点/ }).click();
   await hideInspector(page);
   await expect(page.locator(".workflow-node")).toHaveCount(2);
   const second = page.locator(".workflow-node").nth(1);
   const secondBoxBeforeConnect = await second.boundingBox();
-  const sourceRight = await first
-    .locator(".node-connect-edge--right")
-    .boundingBox();
-  if (!secondBoxBeforeConnect || !sourceRight) {
+  const sourceRight = await nodeBorderPoint(first, "right");
+  if (!secondBoxBeforeConnect) {
     throw new Error("Normal connection nodes unavailable");
   }
   await dragBetween(
     page,
     {
-      x: sourceRight.x + sourceRight.width / 2,
-      y: sourceRight.y + sourceRight.height / 2,
+      x: sourceRight.x,
+      y: sourceRight.y,
     },
     {
       x: secondBoxBeforeConnect.x + secondBoxBeforeConnect.width / 2,
@@ -138,15 +154,13 @@ test("capture connection interaction screenshots", async ({ page }) => {
   await hideInspector(page);
   const third = page.locator(".workflow-node").nth(2);
   const thirdBox = await third.boundingBox();
-  const sourceTop = await first
-    .locator(".node-connect-edge--top")
-    .boundingBox();
-  if (!thirdBox || !sourceTop) throw new Error("Vertical nodes unavailable");
+  const sourceTop = await nodeBorderPoint(first, "top");
+  if (!thirdBox) throw new Error("Vertical nodes unavailable");
   await dragBetween(
     page,
     {
-      x: sourceTop.x + sourceTop.width / 2,
-      y: sourceTop.y + sourceTop.height / 2,
+      x: sourceTop.x,
+      y: sourceTop.y,
     },
     {
       x: thirdBox.x + thirdBox.width / 2,

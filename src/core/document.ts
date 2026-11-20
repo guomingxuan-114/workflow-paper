@@ -1,4 +1,7 @@
 import { createId } from "./id";
+import { reconcileWorkflowBundles } from "./bundles";
+import { migrateWorkflowDocument } from "./migrations";
+import { nodeMetrics, snapNodeSize } from "./nodeShapes";
 import type {
   NodeKind,
   Point,
@@ -7,6 +10,7 @@ import type {
   WorkflowEdge,
   WorkflowGroup,
   WorkflowNode,
+  WorkflowPalette,
   WorkflowTheme,
 } from "./types";
 
@@ -16,12 +20,23 @@ export const GROUP_PADDING = 36;
 
 const allowedNodeKinds: NodeKind[] = [
   "start",
+  "fork",
   "task",
   "decision",
-  "milestone",
   "end",
   "note",
 ];
+
+function forkWidthForTitle(title: string): number {
+  const trimmed = title.trim();
+  if (!trimmed) return 44;
+  const visualLength = Array.from(trimmed).reduce(
+    (length, character) =>
+      length + (/^[\x00-\x7F]$/.test(character) ? 7 : 12),
+    0,
+  );
+  return Math.max(120, Math.min(220, visualLength + 48));
+}
 
 export class WorkflowValidationError extends Error {
   constructor(
@@ -40,10 +55,11 @@ function now(): string {
 export function createDocument(
   title = "未命名工作流",
   theme: WorkflowTheme = "paper",
+  palette: WorkflowPalette = "default",
 ): WorkflowDocument {
   const timestamp = now();
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: createId("doc"),
     metadata: {
       title,
@@ -55,6 +71,7 @@ export function createDocument(
     nodes: [],
     edges: [],
     groups: [],
+    bundles: [],
     layout: {
       nodes: {},
       groups: {},
@@ -63,12 +80,13 @@ export function createDocument(
     display: {
       showDescriptions: true,
       theme,
+      palette,
     },
   };
 }
 
 export function createNode(
-  title = "新步骤",
+  title = "未命名节点",
   position: Point = { x: 120, y: 120 },
   type: NodeKind = "task",
 ): WorkflowNode {
@@ -79,6 +97,7 @@ export function createNode(
     type,
     tags: [],
     origin: { kind: "manual" },
+    important: false,
   };
 }
 
@@ -87,6 +106,7 @@ export function withNode(
   node: WorkflowNode,
   position: Point,
 ): WorkflowDocument {
+  const metrics = nodeMetrics(node);
   return {
     ...document,
     nodes: [...document.nodes, node],
@@ -96,8 +116,8 @@ export function withNode(
         ...document.layout.nodes,
         [node.id]: {
           ...position,
-          width: NODE_WIDTH,
-          height: NODE_HEIGHT,
+          width: metrics.width,
+          height: metrics.height,
         },
       },
     },
@@ -134,11 +154,67 @@ export function updateNode(
   nodeId: string,
   patch: Partial<Omit<WorkflowNode, "id">>,
 ): WorkflowDocument {
+  const previous = document.nodes.find((node) => node.id === nodeId);
+  if (!previous) return document;
+  const next = { ...previous, ...patch, id: previous.id };
+  const layout = document.layout.nodes[nodeId];
+  const typeChanged = patch.type && patch.type !== previous.type;
+  if (!layout) {
+    return {
+      ...document,
+      nodes: document.nodes.map((node) =>
+        node.id === nodeId ? next : node,
+      ),
+    };
+  }
+  const previousMetrics = nodeMetrics(previous);
+  const usesDefaultSize =
+    layout.width === previousMetrics.width &&
+    layout.height === previousMetrics.height;
+  let nextLayout = layout;
+  if (typeChanged && usesDefaultSize) {
+    const nextMetrics = nodeMetrics(next);
+    nextLayout = {
+      ...layout,
+      width: nextMetrics.width,
+      height: nextMetrics.height,
+    };
+  }
+  if (next.type === "fork" && patch.title !== undefined) {
+    const previousAutoWidth = forkWidthForTitle(previous.title);
+    const nextWidth = forkWidthForTitle(next.title);
+    if (
+      nextLayout.width === 44 ||
+      nextLayout.width === previousAutoWidth ||
+      (typeChanged && usesDefaultSize)
+    ) {
+      nextLayout = {
+        ...nextLayout,
+        width: nextWidth,
+        height: nodeMetrics(next).height,
+      };
+    }
+  }
+  if (nextLayout === layout) {
+    return {
+      ...document,
+      nodes: document.nodes.map((node) =>
+        node.id === nodeId ? next : node,
+      ),
+    };
+  }
   return {
     ...document,
     nodes: document.nodes.map((node) =>
-      node.id === nodeId ? { ...node, ...patch, id: node.id } : node,
+      node.id === nodeId ? next : node,
     ),
+    layout: {
+      ...document.layout,
+      nodes: {
+        ...document.layout.nodes,
+        [nodeId]: nextLayout,
+      },
+    },
   };
 }
 
@@ -243,6 +319,166 @@ export function moveGroup(
   };
 }
 
+export function resizeNode(
+  document: WorkflowDocument,
+  nodeId: string,
+  width: number,
+  height: number,
+): WorkflowDocument {
+  const layout = document.layout.nodes[nodeId];
+  const node = document.nodes.find((item) => item.id === nodeId);
+  if (!layout || !node) return document;
+  const metrics = nodeMetrics(node);
+  const snapped = snapNodeSize(
+    Math.max(metrics.minWidth, width),
+    Math.max(metrics.minHeight, height),
+  );
+  if (layout.width === snapped.width && layout.height === snapped.height) {
+    return document;
+  }
+  return {
+    ...document,
+    layout: {
+      ...document.layout,
+      nodes: {
+        ...document.layout.nodes,
+        [nodeId]: { ...layout, ...snapped },
+      },
+    },
+  };
+}
+
+export function removeNodeFromGroup(
+  document: WorkflowDocument,
+  nodeId: string,
+): WorkflowDocument {
+  const groups = document.groups.map((group) =>
+    group.nodeIds.includes(nodeId)
+      ? { ...group, nodeIds: group.nodeIds.filter((id) => id !== nodeId) }
+      : group,
+  );
+  return groups.some(
+    (group, index) =>
+      group.nodeIds.length !== document.groups[index].nodeIds.length,
+  )
+    ? { ...document, groups }
+    : document;
+}
+
+export function addNodeToEdgeEndpointGroup(
+  document: WorkflowDocument,
+  nodeId: string,
+  sourceId: string,
+  targetId: string,
+): WorkflowDocument {
+  const sharedGroup = document.groups.find(
+    (group) =>
+      group.nodeIds.includes(sourceId) &&
+      group.nodeIds.includes(targetId),
+  );
+  if (!sharedGroup || sharedGroup.nodeIds.includes(nodeId)) {
+    return document;
+  }
+  return {
+    ...document,
+    groups: document.groups.map((group) =>
+      group.id === sharedGroup.id
+        ? { ...group, nodeIds: [...group.nodeIds, nodeId] }
+        : group,
+    ),
+  };
+}
+
+export function splitEdge(
+  document: WorkflowDocument,
+  edgeId: string,
+  splitPoint?: Point,
+  inheritedSegment: "source" | "target" = "source",
+  options: {
+    nodeTitle?: string;
+    nodeType?: NodeKind;
+    inheritEndpointGroup?: boolean;
+  } = {},
+): { document: WorkflowDocument; insertedNodeId?: string } {
+  const edge = document.edges.find((item) => item.id === edgeId);
+  if (!edge) return { document };
+  const source = document.layout.nodes[edge.source];
+  const target = document.layout.nodes[edge.target];
+  if (!source || !target) return { document };
+  const insertedNode = createNode(
+    options.nodeTitle ?? "未命名节点",
+    { x: 0, y: 0 },
+    options.nodeType ?? "task",
+  );
+  const metrics = nodeMetrics(insertedNode);
+  const position = {
+    x:
+      (splitPoint?.x ??
+        (source.x + source.width / 2 + target.x + target.width / 2) / 2) -
+      metrics.width / 2,
+    y:
+      (splitPoint?.y ??
+        (source.y + source.height / 2 + target.y + target.height / 2) / 2) -
+      metrics.height / 2,
+  };
+  const inserted = insertedNode;
+  const sourceEdge: WorkflowEdge = {
+    id: createId("edge"),
+    source: edge.source,
+    target: inserted.id,
+    ...(inheritedSegment === "source" && edge.label?.trim()
+      ? { label: edge.label }
+      : {}),
+    origin: "manual",
+    ...(edge.important ? { important: true } : {}),
+    ...(edge.bundleId ? { bundleId: edge.bundleId } : {}),
+  };
+  const targetEdge: WorkflowEdge = {
+    id: createId("edge"),
+    source: inserted.id,
+    target: edge.target,
+    origin: "manual",
+    ...(inheritedSegment === "target" && edge.label?.trim()
+      ? { label: edge.label }
+      : {}),
+  };
+  const withNodeDoc = withNode(
+    {
+      ...document,
+      edges: document.edges.filter((item) => item.id !== edgeId),
+      bundles: document.bundles.map((bundle) =>
+        bundle.edgeIds.includes(edgeId)
+          ? {
+              ...bundle,
+              edgeIds: [
+                ...bundle.edgeIds.filter((id) => id !== edgeId),
+                sourceEdge.id,
+              ],
+            }
+          : bundle,
+      ),
+    },
+    inserted,
+    position,
+  );
+  let next = reconcileWorkflowBundles({
+      ...withNodeDoc,
+      edges: [...withNodeDoc.edges, sourceEdge, targetEdge],
+    });
+  if (options.inheritEndpointGroup !== false) {
+    next = addNodeToEdgeEndpointGroup(
+      next,
+      inserted.id,
+      edge.source,
+      edge.target,
+    );
+  }
+  return {
+    document: next,
+    insertedNodeId: inserted.id,
+  };
+}
+
 export function removeByIds(
   document: WorkflowDocument,
   {
@@ -269,7 +505,7 @@ export function removeByIds(
   const groupLayout = { ...document.layout.groups };
   groups.forEach((id) => delete groupLayout[id]);
 
-  return {
+  return reconcileWorkflowBundles({
     ...document,
     nodes: document.nodes.filter((node) => !expandedNodes.has(node.id)),
     edges: document.edges.filter(
@@ -288,7 +524,7 @@ export function removeByIds(
           : {}),
       })),
     layout: { ...document.layout, nodes: nodeLayout, groups: groupLayout },
-  };
+  });
 }
 
 export function removeSelection(
@@ -477,15 +713,17 @@ export function validateDocument(input: unknown): WorkflowDocument {
   if (!isObject(input)) {
     throw new WorkflowValidationError("文件内容不是有效的工作流文档");
   }
-  if (input.schemaVersion !== 1) {
+  const migrated = migrateWorkflowDocument(input);
+  if (migrated.schemaVersion !== 2) {
     issues.push(
-      `不支持的文档 schemaVersion：${String(input.schemaVersion)}；当前仅支持 1`,
+      `不支持的文档 schemaVersion：${String(input.schemaVersion)}；当前支持 1 和 2`,
     );
   }
-  const document = input as unknown as WorkflowDocument;
+  const document = migrated;
   if (!Array.isArray(document.nodes)) issues.push("nodes 必须是数组");
   if (!Array.isArray(document.edges)) issues.push("edges 必须是数组");
   if (!Array.isArray(document.groups)) issues.push("groups 必须是数组");
+  if (!Array.isArray(document.bundles)) issues.push("bundles 必须是数组");
   if (!isObject(document.layout) || !isObject(document.layout?.nodes)) {
     issues.push("layout.nodes 必须是对象");
   }
@@ -520,6 +758,25 @@ export function validateDocument(input: unknown): WorkflowDocument {
       for (const nodeId of group.nodeIds) {
         if (!nodeIds.has(nodeId)) {
           issues.push(`分组 ${group.id} 引用了不存在的节点 ${nodeId}`);
+        }
+      }
+    }
+    for (const bundle of document.bundles) {
+      if (!nodeIds.has(bundle.sourceId)) {
+        issues.push(`分支束 ${bundle.id} 的 source 不存在`);
+      }
+      if (bundle.forkNodeId) {
+        const forkNode = document.nodes.find(
+          (node) => node.id === bundle.forkNodeId,
+        );
+        if (!forkNode || forkNode.type !== "fork") {
+          issues.push(`分支束 ${bundle.id} 的 forkNodeId 无效`);
+        }
+      }
+      for (const edgeId of bundle.edgeIds) {
+        const edge = document.edges.find((item) => item.id === edgeId);
+        if (!edge || edge.source !== bundle.sourceId) {
+          issues.push(`分支束 ${bundle.id} 包含无效成员边 ${edgeId}`);
         }
       }
     }

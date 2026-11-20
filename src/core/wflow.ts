@@ -16,7 +16,7 @@ export function packWorkflow(document: WorkflowDocument): Uint8Array {
   const manifest: WorkflowManifest = {
     format: "local-workflow",
     containerVersion: 1,
-    documentSchemaVersion: 1,
+    documentSchemaVersion: 2,
     product: PRODUCT.name,
     appVersion: PRODUCT.appVersion,
     createdAt: new Date().toISOString(),

@@ -62,6 +62,17 @@ describe("version diff", () => {
         ...current.groups[1].nodeIds,
         base.groups[0].nodeIds[1],
       ],
+      important: true,
+    };
+    current.nodes[0] = {
+      ...current.nodes[0],
+      milestone: { label: "M1" },
+      important: true,
+    };
+    current.edges[0] = {
+      ...current.edges[0],
+      important: true,
+      bundleId: "bundle-main",
     };
     const diff = compareWorkflowVersions(base, current);
     expect(diff.edges.changed).toEqual(
@@ -84,6 +95,23 @@ describe("version diff", () => {
     expect(diff.edges.removed).toHaveLength(1);
     expect(
       diff.edges.changed.some((entry) => entry.fields.includes("target")),
+    ).toBe(true);
+    expect(
+      diff.edges.changed.some((entry) =>
+        entry.fields.includes("important") &&
+        entry.fields.includes("bundleId"),
+      ),
+    ).toBe(true);
+    expect(
+      diff.changed.some((entry) =>
+        entry.fields.includes("milestone") &&
+        entry.fields.includes("important"),
+      ),
+    ).toBe(true);
+    expect(
+      diff.groups.changed.some((entry) =>
+        entry.fields.includes("important"),
+      ),
     ).toBe(true);
   });
 });

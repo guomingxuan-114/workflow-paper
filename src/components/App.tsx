@@ -21,6 +21,7 @@ import {
   Redo2,
   Save,
   Search,
+  Star,
   Sun,
   Undo2,
 } from "lucide-react";
@@ -32,7 +33,9 @@ import {
   duplicateNodes,
   groupNodes,
   removeByIds,
+  removeNodeFromGroup,
   removeSelection,
+  resizeNode,
   touchDocument,
   updateEdge,
   updateGroup,
@@ -42,6 +45,8 @@ import {
   WorkflowValidationError,
 } from "../core/document";
 import { compareWorkflowVersions } from "../core/diff";
+import { updateBundle } from "../core/bundles";
+import { PALETTES } from "../core/palettes";
 import {
   importSnapshot,
   validateImportSnapshot,
@@ -57,6 +62,7 @@ import type {
   VersionDiff,
   WorkflowDocument,
   WorkflowNode,
+  WorkflowPalette,
   WorkflowTheme,
 } from "../core/types";
 import { localHost } from "../host/localHost";
@@ -106,6 +112,19 @@ function isEditableTarget(target: EventTarget | null): boolean {
   );
 }
 
+function sameStringList(left: string[], right: string[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
+}
+
+function sameSelection(left: Selection, right: Selection): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === "none") return true;
+  return right.kind !== "none" && left.id === right.id;
+}
+
 function filenameFor(document: WorkflowDocument): string {
   return `${document.metadata.title || "未命名工作流"}.${PRODUCT.fileExtension}`;
 }
@@ -120,9 +139,23 @@ function preferredTheme(): WorkflowTheme {
   }
 }
 
+function preferredPalette(): WorkflowPalette {
+  try {
+    return window.localStorage.getItem("workflow-palette") === "bauhaus"
+      ? "bauhaus"
+      : "default";
+  } catch {
+    return "default";
+  }
+}
+
 export function App() {
   const [document, setDocumentState] = useState<WorkflowDocument>(() =>
-    createDocument("未命名工作流", preferredTheme()),
+    createDocument(
+      "未命名工作流",
+      preferredTheme(),
+      preferredPalette(),
+    ),
   );
   const documentRef = useRef(document);
   const [past, setPast] = useState<WorkflowDocument[]>([]);
@@ -146,7 +179,7 @@ export function App() {
   const [templateOpen, setTemplateOpen] = useState(false);
   const [importGuideOpen, setImportGuideOpen] = useState(false);
   const [shortcutOpen, setShortcutOpen] = useState(false);
-  const [branchSourceId, setBranchSourceId] = useState<string | null>(null);
+  const [branchBundleId, setBranchBundleId] = useState<string | null>(null);
   const [recovery, setRecovery] = useState<RecoveryDraft | null>(null);
   const [error, setError] = useState<ErrorState | null>(null);
   const [diffState, setDiffState] = useState<{
@@ -162,6 +195,7 @@ export function App() {
     nodeIds: string[];
     groupIds: string[];
   } | null>(null);
+  const liveEditKeyRef = useRef<string | null>(null);
   const lastAutosaveRef = useRef(0);
   const importInputRef = useRef<HTMLInputElement>(null);
   const compareInputRef = useRef<HTMLInputElement>(null);
@@ -208,9 +242,33 @@ export function App() {
     setFuture([]);
   }, []);
 
+  const endLiveEdit = useCallback(() => {
+    liveEditKeyRef.current = null;
+  }, []);
+
+  const applyEditorChange = useCallback(
+    (
+      liveKey: string | undefined,
+      updater: (current: WorkflowDocument) => WorkflowDocument,
+    ) => {
+      if (liveKey) {
+        if (liveEditKeyRef.current !== liveKey) {
+          checkpoint();
+          liveEditKeyRef.current = liveKey;
+        }
+        apply(updater, false);
+        return;
+      }
+      liveEditKeyRef.current = null;
+      apply(updater, true);
+    },
+    [apply, checkpoint],
+  );
+
   const undo = useCallback(() => {
     const previous = past.at(-1);
     if (!previous) return;
+    liveEditKeyRef.current = null;
     setFuture((items) => [documentRef.current, ...items].slice(0, 80));
     setPast((items) => items.slice(0, -1));
     setDocument(previous);
@@ -219,6 +277,7 @@ export function App() {
   const redo = useCallback(() => {
     const next = future[0];
     if (!next) return;
+    liveEditKeyRef.current = null;
     setPast((items) => [...items, documentRef.current].slice(-80));
     setFuture((items) => items.slice(1));
     setDocument(next);
@@ -244,6 +303,14 @@ export function App() {
     setSelectedNodeIds([]);
     setSelectedEdgeIds([]);
     setSelectedGroupIds([groupId]);
+    setInspectorOpen(true);
+  }, []);
+
+  const selectEdge = useCallback((edgeId: string) => {
+    setSelection({ kind: "edge", id: edgeId });
+    setSelectedNodeIds([]);
+    setSelectedEdgeIds([edgeId]);
+    setSelectedGroupIds([]);
     setInspectorOpen(true);
   }, []);
 
@@ -289,7 +356,11 @@ export function App() {
 
   const newBlank = useCallback(() => {
     if (!confirmDiscard()) return;
-    const next = createDocument("未命名工作流", preferredTheme());
+    const next = createDocument(
+      "未命名工作流",
+      preferredTheme(),
+      preferredPalette(),
+    );
     openDocument(next, null, true);
     setSaveState("idle");
   }, [confirmDiscard, openDocument]);
@@ -314,6 +385,14 @@ export function App() {
       // Theme persistence is optional when local storage is unavailable.
     }
   }, [document.display.theme]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("workflow-palette", document.display.palette);
+    } catch {
+      // Palette persistence is optional when local storage is unavailable.
+    }
+  }, [document.display.palette]);
 
   const save = useCallback(
     async (saveAs = false, quiet = false) => {
@@ -382,7 +461,7 @@ export function App() {
           ? { x: anchor.x + 290, y: anchor.y }
           : { x: 150 + current.nodes.length * 24, y: 150 });
       const node = createNode(
-        "新步骤",
+        "未命名节点",
         computed,
         "task",
       );
@@ -471,6 +550,43 @@ export function App() {
     if (created) selectGroup(created.id);
     toast("已创建分组，可折叠或拖动整体位置", "success");
   }, [apply, selectGroup, selectedNodeIds, toast]);
+
+  const markSelectionImportant = useCallback(() => {
+    if (
+      selectedNodeIds.length === 0 &&
+      selectedEdgeIds.length === 0 &&
+      selectedGroupIds.length === 0
+    ) {
+      toast("先选择节点、关系或分组");
+      return;
+    }
+    apply((current) => ({
+      ...current,
+      nodes: current.nodes.map((node) =>
+        selectedNodeIds.includes(node.id) ? { ...node, important: true } : node,
+      ),
+      edges: current.edges.map((edge) =>
+        selectedEdgeIds.includes(edge.id)
+          ? { ...edge, important: true }
+          : edge,
+      ),
+      groups: current.groups.map((group) =>
+        selectedGroupIds.includes(group.id)
+          ? { ...group, important: true }
+          : group,
+      ),
+    }), true);
+    toast("所选对象已标记为重要", "success");
+  }, [apply, selectedEdgeIds, selectedGroupIds, selectedNodeIds, toast]);
+
+  const selectAllElements = useCallback(() => {
+    const current = documentRef.current;
+    if (current.nodes.length === 0) return;
+    setSelection({ kind: "node", id: current.nodes[0].id });
+    setSelectedNodeIds(current.nodes.map((node) => node.id));
+    setSelectedEdgeIds(current.edges.map((edge) => edge.id));
+    setSelectedGroupIds(current.groups.map((group) => group.id));
+  }, []);
 
   const toggleGroup = useCallback(
     (groupId: string) => {
@@ -708,6 +824,11 @@ export function App() {
         copySelection();
         return;
       }
+      if (mod && event.key.toLowerCase() === "a") {
+        event.preventDefault();
+        selectAllElements();
+        return;
+      }
       if (mod && event.key.toLowerCase() === "v") {
         event.preventDefault();
         pasteSelection();
@@ -741,7 +862,9 @@ export function App() {
       }
       if (
         (event.key.toLowerCase() === "e" || event.key === "Enter") &&
-        selection.kind === "node"
+        selection.kind === "node" &&
+        documentRef.current.nodes.find((node) => node.id === selection.id)
+          ?.type !== "fork"
       ) {
         event.preventDefault();
         setEditorNodeId(selection.id);
@@ -771,6 +894,7 @@ export function App() {
     pasteSelection,
     redo,
     save,
+    selectAllElements,
     selection,
     undo,
   ]);
@@ -794,6 +918,7 @@ export function App() {
           onTemplates={() => setTemplateOpen(true)}
           onOpen={() => void open()}
           theme={document.display.theme}
+          palette={document.display.palette}
         />
         <input
           ref={importInputRef}
@@ -841,6 +966,7 @@ export function App() {
     <div
       className={`app-shell ${dirty ? "is-dirty" : ""}`}
       data-theme={document.display.theme}
+      data-palette={document.display.palette}
     >
       <header className="topbar">
         <div className="topbar-left">
@@ -911,6 +1037,32 @@ export function App() {
           </button>
         </div>
         <div className="topbar-actions">
+          <select
+            className="palette-select"
+            aria-label="配色方案"
+            value={document.display.palette}
+            onChange={(event) =>
+              apply(
+                (current) => ({
+                  ...current,
+                  display: {
+                    ...current.display,
+                    palette: event.target.value as WorkflowPalette,
+                  },
+                }),
+                true,
+              )
+            }
+            title={`当前配色：${PALETTES[document.display.palette].name}。灵感：${PALETTES[document.display.palette].inspiration}`}
+          >
+            {Object.values(PALETTES).map((palette) => (
+              <option key={palette.id} value={palette.id}>
+                {palette.id === "bauhaus"
+                  ? `${palette.name}（包豪斯灵感）`
+                  : palette.name}
+              </option>
+            ))}
+          </select>
           <button
             className="icon-button"
             onClick={toggleTheme}
@@ -991,6 +1143,10 @@ export function App() {
             <BookOpenText size={16} />
             <span>建分组</span>
           </button>
+          <button onClick={markSelectionImportant} title="标记所选对象为重要">
+            <Star size={16} />
+            <span>标记重要</span>
+          </button>
           <button
             onClick={() => compareInputRef.current?.click()}
             title="与另一个导入快照对比"
@@ -1067,7 +1223,8 @@ export function App() {
               selectedGroupIds={selectedGroupIds}
               onSelect={(kind, id) => {
                 if (kind === "node") selectNode(id);
-                else selectGroup(id);
+                else if (kind === "group") selectGroup(id);
+                else selectEdge(id);
                 setNarrowDrawer(null);
               }}
               onToggleGroup={toggleGroup}
@@ -1086,7 +1243,10 @@ export function App() {
         ) : null}
 
         <main className="main-stage">
-          {view === "canvas" ? (
+          <div
+            className="canvas-view-host"
+            hidden={view !== "canvas"}
+          >
             <CanvasView
               document={document}
               externalNodeIds={selectedNodeIds}
@@ -1095,48 +1255,70 @@ export function App() {
               onApply={apply}
               onCheckpoint={checkpoint}
               onSelectionChange={(primary, nodeIds, edgeIds, groupIds) => {
-                setSelection(primary);
-                setSelectedNodeIds(nodeIds);
-                setSelectedEdgeIds(edgeIds);
-                setSelectedGroupIds(groupIds);
+                setSelection((current) =>
+                  sameSelection(current, primary) ? current : primary,
+                );
+                setSelectedNodeIds((current) =>
+                  sameStringList(current, nodeIds) ? current : nodeIds,
+                );
+                setSelectedEdgeIds((current) =>
+                  sameStringList(current, edgeIds) ? current : edgeIds,
+                );
+                setSelectedGroupIds((current) =>
+                  sameStringList(current, groupIds) ? current : groupIds,
+                );
                 if (primary.kind !== "none") setInspectorOpen(true);
               }}
               onEditNode={setEditorNodeId}
               onCreateGroup={createGroup}
-              onEditBranches={setBranchSourceId}
+              onEditBranches={setBranchBundleId}
               onToggleGroup={toggleGroup}
               onViewportChange={updateViewport}
             />
-          ) : (
+          </div>
+          {view === "outline" ? (
             <OutlineView
               document={document}
               selectedNodeIds={selectedNodeIds}
               selectedGroupIds={selectedGroupIds}
               onSelect={(kind, id) => {
                 if (kind === "node") selectNode(id);
-                else selectGroup(id);
+                else if (kind === "group") selectGroup(id);
+                else selectEdge(id);
               }}
               onToggleGroup={toggleGroup}
               onRenameNode={(nodeId, title) =>
                 apply((doc) => updateNode(doc, nodeId, { title }), false)
               }
             />
-          )}
+          ) : null}
         </main>
 
         {inspectorOpen ? (
           <Inspector
             document={document}
             selection={selection}
-            onUpdateNode={(id, patch: Partial<WorkflowNode>) =>
-              apply((doc) => updateNode(doc, id, patch), true)
+            onUpdateNode={(id, patch: Partial<WorkflowNode>, liveKey) =>
+              applyEditorChange(liveKey, (doc) =>
+                updateNode(doc, id, patch),
+              )
             }
-            onUpdateEdge={(id, label) =>
-              apply((doc) => updateEdge(doc, id, { label }), true)
+            onResizeNode={(id, width, height, liveKey) =>
+              applyEditorChange(liveKey, (doc) =>
+                resizeNode(doc, id, width, height),
+              )
             }
-            onUpdateGroup={(id, patch) =>
-              apply((doc) => updateGroup(doc, id, patch), true)
+            onUpdateEdge={(id, patch, liveKey) =>
+              applyEditorChange(liveKey, (doc) =>
+                updateEdge(doc, id, patch),
+              )
             }
+            onUpdateGroup={(id, patch, liveKey) =>
+              applyEditorChange(liveKey, (doc) =>
+                updateGroup(doc, id, patch),
+              )
+            }
+            onEndLiveEdit={endLiveEdit}
             onToggleGroup={toggleGroup}
             onDelete={(target) => {
               apply((doc) => removeSelection(doc, target), true);
@@ -1144,6 +1326,9 @@ export function App() {
             }}
             onDuplicate={duplicateSelection}
             onCreateGroup={createGroup}
+            onRemoveFromGroup={(nodeId) =>
+              apply((doc) => removeNodeFromGroup(doc, nodeId), true)
+            }
             onCollapsePanel={() => setInspectorOpen(false)}
             onCloseSelection={clearSelection}
           />
@@ -1203,39 +1388,49 @@ export function App() {
       {shortcutOpen ? (
         <ShortcutDialog onClose={() => setShortcutOpen(false)} />
       ) : null}
-      {branchSourceId
+      {branchBundleId
         ? (() => {
+            const bundle = document.bundles.find(
+              (item) => item.id === branchBundleId,
+            );
+            if (!bundle) return null;
             const source = document.nodes.find(
-              (node) => node.id === branchSourceId,
+              (node) => node.id === bundle.sourceId,
             );
             if (!source) return null;
+            const bundleEdges = document.edges.filter((edge) =>
+              bundle.edgeIds.includes(edge.id),
+            );
             return (
               <BranchConditionsDialog
                 source={source}
-                edges={document.edges.filter(
-                  (edge) => edge.source === branchSourceId,
-                )}
+                edges={bundleEdges}
+                bundleLabel={bundle.label}
+                bundleVisible={bundle.visible}
                 targetTitle={(nodeId) =>
                   document.nodes.find((node) => node.id === nodeId)?.title ??
                   nodeId
                 }
-                onSave={(labels) =>
-                  apply(
-                    (current) => ({
+                onSave={(labels, label, visible) =>
+                  apply((current) => {
+                    const withEdges = {
                       ...current,
                       edges: current.edges.map((edge) =>
-                        edge.source === branchSourceId
+                        bundle.edgeIds.includes(edge.id)
                           ? {
                               ...edge,
                               label: labels[edge.id]?.trim() ?? "",
                             }
                           : edge,
                       ),
-                    }),
-                    true,
-                  )
+                    };
+                    return updateBundle(withEdges, bundle.id, {
+                      label: label.trim(),
+                      visible,
+                    });
+                  }, true)
                 }
-                onClose={() => setBranchSourceId(null)}
+                onClose={() => setBranchBundleId(null)}
               />
             );
           })()
