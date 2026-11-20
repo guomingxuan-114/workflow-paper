@@ -12,13 +12,14 @@ export interface HostSaveResult {
 }
 
 export interface WorkflowHost {
-  readonly kind: "local-shell" | "browser";
+  readonly kind: "local-shell" | "browser" | "desktop";
   supportsAtomicAutoSave(): Promise<boolean>;
   openWorkflow(): Promise<HostDocument | null>;
   saveWorkflow(
     document: WorkflowDocument,
     currentName: string | null,
     saveAs?: boolean,
+    autoSave?: boolean,
   ): Promise<HostSaveResult>;
   exportHtml(html: string, title: string): Promise<"print" | "download">;
   readContext(): Promise<Record<string, string>>;

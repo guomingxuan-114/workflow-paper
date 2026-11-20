@@ -20,7 +20,7 @@ dist/index.html                       0.89 kB
 dist/assets/index-*.css              61.25 kB
 dist/assets/archive-vendor-*.js      12.43 kB
 dist/assets/flow-vendor-*.js        203.57 kB
-dist/assets/index-*.js              352.17 kB
+dist/assets/index-*.js              352.84 kB
 ```
 
 ## 单元与集成覆盖

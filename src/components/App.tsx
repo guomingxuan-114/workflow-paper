@@ -773,7 +773,12 @@ export function App() {
       lastAutosaveRef.current = Date.now();
       const snapshot = document;
       try {
-        const result = await localHost.saveWorkflow(snapshot, fileName, false);
+        const result = await localHost.saveWorkflow(
+          snapshot,
+          fileName,
+          false,
+          true,
+        );
         if (cancelled) return;
         setSavedSnapshot(workflowContentKey(snapshot));
         setSaveState("autosaved");

@@ -6,6 +6,7 @@ import type {
   HostSaveResult,
   WorkflowHost,
 } from "./types";
+import { getDesktopBridge } from "./desktopBridge";
 
 function safeDownloadName(name: string): string {
   const base = name.trim().replace(/[\\/:*?"<>|]+/g, "-") || "未命名工作流";
@@ -92,10 +93,22 @@ export const localHost: WorkflowHost = {
   kind: "local-shell",
 
   async supportsAtomicAutoSave() {
+    if (getDesktopBridge()) return true;
     return localHostAvailable();
   },
 
   async openWorkflow(): Promise<HostDocument | null> {
+    const desktop = getDesktopBridge();
+    if (desktop) {
+      const opened = await desktop.openWorkflow();
+      if (!opened) return null;
+      const bytes = base64ToBytes(opened.data);
+      return {
+        fileName: opened.fileName,
+        bytes,
+        document: unpackWorkflow(bytes),
+      };
+    }
     if (await localHostAvailable()) {
       const response = await fetch("/api/documents");
       if (response.ok) {
@@ -143,7 +156,28 @@ export const localHost: WorkflowHost = {
     document: WorkflowDocument,
     currentName: string | null,
     saveAs = false,
+    autoSave = false,
   ): Promise<HostSaveResult> {
+    const desktop = getDesktopBridge();
+    const bytes = packWorkflow(document);
+    if (desktop) {
+      const proposedName = safeDownloadName(document.metadata.title);
+      const result = await desktop.saveWorkflow({
+        fileName: currentName,
+        proposedName,
+        saveAs,
+        autoSave,
+        data: bytesToBase64(bytes),
+      });
+      if (result.canceled) throw new Error("已取消保存");
+      return {
+        fileName:
+          result.fileName ??
+          currentName ??
+          proposedName,
+        mode: "local-atomic",
+      };
+    }
     let name = saveAs ? null : currentName;
     if (!name) {
       const proposed = safeDownloadName(document.metadata.title);
@@ -154,7 +188,6 @@ export const localHost: WorkflowHost = {
       if (!name) throw new Error("已取消保存");
     }
     name = safeDownloadName(name);
-    const bytes = packWorkflow(document);
     if (await localHostAvailable()) {
       const response = await fetch("/api/documents", {
         method: "POST",
@@ -171,9 +204,22 @@ export const localHost: WorkflowHost = {
     return { fileName: name, mode: "download" };
   },
 
-  exportHtml: createPdfHtmlHost(),
+  async exportHtml(html, title) {
+    const desktop = getDesktopBridge();
+    if (desktop) {
+      return desktop.exportPdf({ html, title });
+    }
+    return createPdfHtmlHost()(html, title);
+  },
 
   async readContext() {
+    if (getDesktopBridge()) {
+      return {
+        host: "desktop",
+        locale: navigator.language,
+        offline: "true",
+      };
+    }
     return {
       host: "local-shell",
       locale: navigator.language,
